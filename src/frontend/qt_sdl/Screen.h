@@ -121,8 +121,8 @@ protected:
     std::deque<OSDItem> osdItems;
 
     QPixmap splashLogo;
-    OSDItem splashText[3];
-    QPoint splashPos[4];
+    OSDItem splashText[4];
+    QPoint splashPos[5];
 
     void loadConfig();
 

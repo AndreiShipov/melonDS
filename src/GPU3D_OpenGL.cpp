@@ -21,59 +21,126 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <unordered_set>
 #include "NDS.h"
 #include "GPU.h"
 #include "GPU3D_OpenGL_shaders.h"
+#include "stb_image_write.h"
 
 namespace melonDS
 {
+
+static std::unordered_map<const melonDS::ReplacementTex*, GLuint> gReplGL;
+
+static GLuint GetOrCreateGLTex(const melonDS::ReplacementTex* R){
+    auto it = gReplGL.find(R);
+    if (it != gReplGL.end()) return it->second;
+
+    if (!R || R->w <= 0 || R->h <= 0 || R->rgba.empty()) return 0;
+
+    // save active unit
+    GLint prevActive; glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActive);
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, R->w, R->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, R->rgba.data());
+
+    // restore active unit
+    glActiveTexture(prevActive);
+
+    gReplGL[R] = tex;
+    return tex;
+}
 
 bool GLRenderer::BuildRenderShader(u32 flags, const std::string& vs, const std::string& fs)
 {
     char shadername[32];
     snprintf(shadername, sizeof(shadername), "RenderShader%02X", flags);
 
-    int headerlen = strlen(kShaderHeader);
-
-    std::string vsbuf;
-    vsbuf += kShaderHeader;
-    vsbuf += kRenderVSCommon;
-    vsbuf += vs;
-
-    std::string fsbuf;
-    fsbuf += kShaderHeader;
-    fsbuf += kRenderFSCommon;
-    fsbuf += fs;
+    std::string vsbuf = std::string(kShaderHeader) + kRenderVSCommon + vs;
+    std::string fsbuf = std::string(kShaderHeader) + kRenderFSCommon + fs;
 
     GLuint prog;
-    bool ret = OpenGL::CompileVertexFragmentProgram(prog,
+    bool ret = OpenGL::CompileVertexFragmentProgram(
+        prog,
         vsbuf, fsbuf,
         shadername,
         {{"vPosition", 0}, {"vColor", 1}, {"vTexcoord", 2}, {"vPolygonAttr", 3}},
-        {{"oColor", 0}, {"oAttr", 1}});
-
+        {{"oColor", 0}, {"oAttr", 1}}
+    );
     if (!ret) return false;
+
+    // Привязка UBO
+    GLint loc = glGetUniformBlockIndex(prog, "uConfig");
+    if (loc >= 0) glUniformBlockBinding(prog, loc, 0);
+
+    glUseProgram(prog);
+
+   // sampler units
+    if (GLint loc = glGetUniformLocation(prog, "TexMem");    loc >= 0) glUniform1i(loc, 0);
+    if (GLint loc = glGetUniformLocation(prog, "TexPalMem"); loc >= 0) glUniform1i(loc, 1);
+    if (GLint loc = glGetUniformLocation(prog, "ReplTex");   loc >= 0) glUniform1i(loc, 2);
+
+    // cache locs + defaults
+    ReplSizeLoc[flags] = glGetUniformLocation(prog, "ReplSize");
+    ReplUseLoc [flags] = glGetUniformLocation(prog, "uUseRepl");
+    if (ReplUseLoc[flags]  >= 0) glUniform1i(ReplUseLoc[flags], 0);
+    if (ReplSizeLoc[flags] >= 0) glUniform2f(ReplSizeLoc[flags], 1.f, 1.f);
 
     GLint uni_id = glGetUniformBlockIndex(prog, "uConfig");
     glUniformBlockBinding(prog, uni_id, 0);
 
-    glUseProgram(prog);
+    // уже было:
+    uni_id = glGetUniformLocation(prog, "TexMem");    glUniform1i(uni_id, 0);
+    uni_id = glGetUniformLocation(prog, "TexPalMem"); glUniform1i(uni_id, 1);
 
-    uni_id = glGetUniformLocation(prog, "TexMem");
-    glUniform1i(uni_id, 0);
-    uni_id = glGetUniformLocation(prog, "TexPalMem");
-    glUniform1i(uni_id, 1);
+    // добавь:
+    if (GLint loc = glGetUniformLocation(prog, "ReplTex"); loc >= 0) {
+        glUniform1i(loc, 2); // sampler2D для замен — всегда unit 2
+    }
+    ReplSizeLoc[flags] = glGetUniformLocation(prog, "ReplSize");   // может быть -1
+    ReplUseLoc [flags] = glGetUniformLocation(prog, "uUseRepl");   // может быть -1
 
     RenderShader[flags] = prog;
-
     return true;
 }
 
 void GLRenderer::UseRenderShader(u32 flags)
 {
     if (CurShaderID == flags) return;
-    glUseProgram(RenderShader[flags]);
+
+    GLuint prog = RenderShader[flags];
+    if (!prog) return; // можно заменить на assert(prog);
+
+    glUseProgram(prog);
     CurShaderID = flags;
+
+    // Сброс дефолтов только если включена замена текстур
+    if (gEnableTexReplace)
+    {
+        // uUseRepl = 0, ReplSize = (1,1) — если униформы есть в данном шейдере
+        if (ReplUseLoc[flags]  >= 0) glUniform1i(ReplUseLoc[flags], 0);
+        if (ReplSizeLoc[flags] >= 0) glUniform2f(ReplSizeLoc[flags], 1.f, 1.f);
+
+        // Гарантируем валидную текстуру в unit 2, но без лишних биндов
+        if (BoundReplTex != ReplFallbackTex)
+        {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, ReplFallbackTex);
+            glActiveTexture(GL_TEXTURE0);
+            BoundReplTex = ReplFallbackTex;
+        }
+    }
+    // если gEnableTexReplace == false — вообще ничего не трогаем:
+    // шейдер всё равно не будет читать ReplTex (uUseRepl=0 в батчах),
+    // а fallback у нас уже создан и, как правило, один раз был забинден на старте.
 }
 
 void SetupDefaultTexParams(GLuint tex)
@@ -278,6 +345,22 @@ std::unique_ptr<GLRenderer> GLRenderer::New() noexcept
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 1024, 48, 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, NULL);
 
+    // --- Fallback для ReplTex (unit 2), чтобы sampler2D всегда имел валидную float-текстуру
+    glActiveTexture(GL_TEXTURE2);
+    glGenTextures(1, &result->ReplFallbackTex);
+    glBindTexture(GL_TEXTURE_2D, result->ReplFallbackTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // белый RGBA8
+    const uint32_t white = 0xFFFFFFFFu;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &white);
+
+    glActiveTexture(GL_TEXTURE0);
+    result->BoundReplTex = result->ReplFallbackTex;
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     return result;
@@ -289,6 +372,7 @@ GLRenderer::~GLRenderer()
 
     glDeleteTextures(1, &TexMemID);
     glDeleteTextures(1, &TexPalMemID);
+    glDeleteTextures(1, &ReplFallbackTex);
 
     glDeleteFramebuffers(1, &MainFramebuffer);
     glDeleteFramebuffers(1, &DownscaleFramebuffer);
@@ -308,6 +392,33 @@ GLRenderer::~GLRenderer()
     {
         if (!RenderShader[i]) continue;
         glDeleteProgram(RenderShader[i]);
+    }
+}
+
+void GLRenderer::ApplyReplUniformsForBatch(const RendererPolygon* rp) const
+{
+    if (!gEnableTexReplace) return;
+
+    // что хотим видеть в unit=2
+    GLuint want = ReplFallbackTex;
+    int w = 1, h = 1;
+
+    if (rp && rp->ReplTex) {
+        want = GetOrCreateGLTex(rp->ReplTex); // <-- ленивое создание тут
+        if (want) { w = rp->ReplTex->w; h = rp->ReplTex->h; }
+        else      { want = ReplFallbackTex;  w = 1; h = 1; }
+    }
+
+    if (want != BoundReplTex) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, want);
+        glActiveTexture(GL_TEXTURE0);
+        BoundReplTex = want;
+    }
+
+    if (CurShaderID >= 0 && CurShaderID < 16) {
+        if (ReplUseLoc[CurShaderID]  >= 0) glUniform1i(ReplUseLoc[CurShaderID],  (rp && rp->ReplTex) ? 1 : 0);
+        if (ReplSizeLoc[CurShaderID] >= 0) glUniform2f(ReplSizeLoc[CurShaderID], float(w), float(h));
     }
 }
 
@@ -412,6 +523,17 @@ void GLRenderer::SetupPolygon(GLRenderer::RendererPolygon* rp, Polygon* polygon)
     else
     {
         rp->RenderKey |= 0x30000;
+    }
+
+    // ключ VRAM
+    u32 texparam = polygon->TexParam;
+    u32 fmt = (texparam >> 26) & 7;
+    if (fmt == 0 || !gEnableTexReplace) {
+        rp->ReplTex = nullptr; // у полигона нет текстуры → замены быть не может
+    } else {
+        u32 vramaddr = (texparam & 0xFFFF) << 3;
+        auto R = GetBound(vramaddr, texparam, polygon->TexPalette);
+        rp->ReplTex = R ? R.get() : nullptr;
     }
 }
 
@@ -698,9 +820,59 @@ void GLRenderer::BuildPolygons(GLRenderer::RendererPolygon* polygons, int npolys
     NumEdgeIndices = eidx - EdgeIndicesOffset;
 }
 
+/*inline void GLRenderer::ApplyReplUniforms(u32 flags, const RendererPolygon* rp) const
+{
+    if (rp->ReplTex) {
+        // ленивый аплоад в GL
+        if (rp->ReplTex->gltex == 0) {
+            GLuint tex;
+            glGenTextures(1, &tex);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rp->ReplTex->w, rp->ReplTex->h,
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, rp->ReplTex->rgba.data());
+            rp->ReplTex->gltex = tex;
+        } else {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, rp->ReplTex->gltex);
+        }
+        glUniform1i(ReplUseLoc[flags], 1);
+        glUniform2f(ReplSizeLoc[flags], (float)rp->ReplTex->w, (float)rp->ReplTex->h);
+    } else {
+        glUniform1i(ReplUseLoc[flags], 0);
+    }
+}*/
+
+void GLRenderer::ApplyReplUniforms(u32 flags, const RendererPolygon* rp) const
+{
+    if (!gEnableTexReplace) return;
+    if (rp && rp->ReplTex) {
+        GLuint tex = GetOrCreateGLTex(rp->ReplTex);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        if (ReplUseLoc[flags] >= 0) glUniform1i(ReplUseLoc[flags], 1);
+        if (ReplSizeLoc[flags] >= 0) glUniform2f(ReplSizeLoc[flags],
+                                                 float(rp->ReplTex->w), float(rp->ReplTex->h));
+    } else {
+        if (ReplUseLoc[flags] >= 0) glUniform1i(ReplUseLoc[flags], 0);
+        if (ReplSizeLoc[flags] >= 0) glUniform2f(ReplSizeLoc[flags], 1.f, 1.f);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, ReplFallbackTex);
+    }
+    // ВСЕГДА возвращаемся на 0
+    glActiveTexture(GL_TEXTURE0);
+}
+
 int GLRenderer::RenderSinglePolygon(int i) const
 {
     const RendererPolygon* rp = &PolygonList[i];
+    if (gEnableTexReplace) {
+        ApplyReplUniforms(CurShaderID, rp);
+    }
 
     glDrawElements(rp->PrimType, rp->NumIndices, GL_UNSIGNED_SHORT, (void*)(uintptr_t)(rp->IndicesOffset * 2));
 
@@ -710,22 +882,40 @@ int GLRenderer::RenderSinglePolygon(int i) const
 int GLRenderer::RenderPolygonBatch(int i) const
 {
     const RendererPolygon* rp = &PolygonList[i];
-    GLuint primtype = rp->PrimType;
-    u32 key = rp->RenderKey;
+    const GLuint primtype = rp->PrimType;
+    const u32 key = rp->RenderKey;
+
+    // Если замены включены — склеиваем батчи только для одинакового ReplTex (включая nullptr)
+    const bool replFeature = gEnableTexReplace;
+    const void* replKey = replFeature ? static_cast<const void*>(rp->ReplTex) : nullptr;
+
     int numpolys = 0;
     u32 numindices = 0;
 
-    for (int iend = i; iend < NumFinalPolys; iend++)
+    for (int iend = i; iend < NumFinalPolys; ++iend)
     {
-        const RendererPolygon* cur_rp = &PolygonList[iend];
-        if (cur_rp->PrimType != primtype) break;
-        if (cur_rp->RenderKey != key) break;
+        const RendererPolygon* cur = &PolygonList[iend];
+        if (cur->PrimType != primtype) break;
+        if (cur->RenderKey != key) break;
+        if (replFeature && (cur->ReplTex != replKey)) break; // сменился ReplTex — новый батч
 
         numpolys++;
-        numindices += cur_rp->NumIndices;
+        numindices += cur->NumIndices;
     }
 
-    glDrawElements(primtype, numindices, GL_UNSIGNED_SHORT, (void*)(uintptr_t)(rp->IndicesOffset * 2));
+    // ВАЖНО: всегда проставляем униформы/текстуру для текущего батча,
+    // даже если ReplTex == nullptr — тогда функция выключит замену и забиндит fallback.
+    if (replFeature) {
+        ApplyReplUniformsForBatch(rp);
+    }
+
+    glDrawElements(
+        primtype,
+        numindices,
+        GL_UNSIGNED_SHORT,
+        (void*)(uintptr_t)(rp->IndicesOffset * sizeof(u16))
+    );
+
     return numpolys;
 }
 
@@ -853,6 +1043,7 @@ void GLRenderer::RenderSceneChunk(const GPU3D& gpu3d, int y, int h)
                     // draw actual shadow mask
 
                     UseRenderShader(flags | RenderFlag_ShadowMask);
+                    if (ReplUseLoc[CurShaderID] >= 0) glUniform1i(ReplUseLoc[CurShaderID], 0);
 
                     glDisable(GL_BLEND);
                     glColorMaski(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -1112,9 +1303,287 @@ void GLRenderer::RenderSceneChunk(const GPU3D& gpu3d, int y, int h)
     }
 }
 
+// CPU-сэмплер текстуры DS (как в SoftRenderer::TextureLookup)
+// s,t — 4.12 fixed, texparam/texpal — регистры DS.
+static inline void TextureLookup_CPU(const GPU& gpu,
+                                     u32 texparam, u32 texpal,
+                                     s16 s, s16 t,
+                                     u16* outColor, u8* outAlpha)
+{
+    u32 vramaddr = (texparam & 0xFFFF) << 3;
+
+    s32 width  = 8 << ((texparam >> 20) & 0x7);
+    s32 height = 8 << ((texparam >> 23) & 0x7);
+
+    // -> DS texel coords
+    s >>= 4;
+    t >>= 4;
+
+    // wrapping зерк/клэмп как на DS
+    auto wrap1 = [](int v, int size, bool wrap, bool mirror) {
+        if (wrap) {
+            if (mirror) {
+                if (v & size) v = (size - 1) - (v & (size - 1));
+                else          v = (v & (size - 1));
+            } else {
+                v &= (size - 1);
+            }
+        } else {
+            if (v < 0) v = 0;
+            else if (v >= size) v = size - 1;
+        }
+        return v;
+    };
+
+    bool wrapS   = (texparam & (1<<16));
+    bool wrapT   = (texparam & (1<<17));
+    bool mirrorS = (texparam & (1<<18));
+    bool mirrorT = (texparam & (1<<19));
+    s = wrap1(s, width,  wrapS, mirrorS);
+    t = wrap1(t, height, wrapT, mirrorT);
+
+    u8 alpha0 = (texparam & (1<<29)) ? 0 : 31;
+
+    switch ((texparam >> 26) & 0x7)
+    {
+    case 1: // A3I5
+    {
+        vramaddr += ((t * width) + s);
+        u8 px = gpu.ReadVRAMFlat_Texture<u8>(vramaddr);
+        texpal <<= 4;
+        *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + ((px & 0x1F) << 1));
+        *outAlpha = ((px >> 3) & 0x1C) + (px >> 6);
+        break;
+    }
+    case 2: // 4-color
+    {
+        vramaddr += (((t * width) + s) >> 2);
+        u8 px = gpu.ReadVRAMFlat_Texture<u8>(vramaddr);
+        px >>= ((s & 0x3) << 1);
+        px &= 0x3;
+        texpal <<= 3;
+        *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + (px << 1));
+        *outAlpha = (px==0) ? alpha0 : 31;
+        break;
+    }
+    case 3: // 16-color
+    {
+        vramaddr += (((t * width) + s) >> 1);
+        u8 px = gpu.ReadVRAMFlat_Texture<u8>(vramaddr);
+        if (s & 0x1) px >>= 4; else px &= 0xF;
+        texpal <<= 4;
+        *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + (px << 1));
+        *outAlpha = (px==0) ? alpha0 : 31;
+        break;
+    }
+    case 4: // 256-color
+    {
+        vramaddr += ((t * width) + s);
+        u8 px = gpu.ReadVRAMFlat_Texture<u8>(vramaddr);
+        texpal <<= 4;
+        *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + (px << 1));
+        *outAlpha = (px==0) ? alpha0 : 31;
+        break;
+    }
+    case 5: // compressed (DS 4x4)
+    {
+        vramaddr += ((t & 0x3FC) * (width>>2)) + (s & 0x3FC);
+        vramaddr += (t & 0x3);
+        vramaddr &= 0x7FFFF; // wrap after slot 3
+
+        u32 slot1addr = 0x20000 + ((vramaddr & 0x1FFFC) >> 1);
+        if (vramaddr >= 0x40000) slot1addr += 0x10000;
+
+        u8 val;
+        if (vramaddr >= 0x20000 && vramaddr < 0x40000)
+            val = 0;
+        else {
+            val = gpu.ReadVRAMFlat_Texture<u8>(vramaddr);
+            val >>= (2 * (s & 0x3));
+        }
+
+        u16 palinfo = gpu.ReadVRAMFlat_Texture<u16>(slot1addr);
+        u32 paloffset = (palinfo & 0x3FFF) << 2;
+        texpal <<= 4;
+
+        auto blend555 = [](u16 c0, u16 c1, int w0, int w1, int denom) {
+            u32 r0 =  c0        & 0x001F, r1 =  c1        & 0x001F;
+            u32 g0 = (c0 >> 5)  & 0x001F, g1 = (c1 >> 5)  & 0x001F;
+            u32 b0 = (c0 >> 10) & 0x001F, b1 = (c1 >> 10) & 0x001F;
+            u32 r = (r0*w0 + r1*w1) / denom;
+            u32 g = (g0*w0 + g1*w1) / denom;
+            u32 b = (b0*w0 + b1*w1) / denom;
+            return (u16)(r | (g<<5) | (b<<10));
+        };
+
+        switch (val & 0x3)
+        {
+        case 0:
+            *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset);
+            *outAlpha = 31;
+            break;
+        case 1:
+            *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset + 2);
+            *outAlpha = 31;
+            break;
+        case 2:
+        {
+            u16 c0 = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset);
+            u16 c1 = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset + 2);
+            switch (palinfo >> 14) {
+            case 1: *outColor = blend555(c0, c1, 1,1,2); break;        // avg
+            case 3: *outColor = blend555(c0, c1, 5,3,8); break;        // 5/3
+            default:*outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset + 4); break;
+            }
+            *outAlpha = 31;
+            break;
+        }
+        case 3:
+            if ((palinfo >> 14) == 2) {
+                *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset + 6);
+                *outAlpha = 31;
+            } else if ((palinfo >> 14) == 3) {
+                u16 c0 = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset);
+                u16 c1 = gpu.ReadVRAMFlat_TexPal<u16>(texpal + paloffset + 2);
+                *outColor = blend555(c0, c1, 3,5,8); // 3/5
+                *outAlpha = 31;
+            } else {
+                *outColor = 0; *outAlpha = 0;
+            }
+            break;
+        }
+        break;
+    }
+    case 6: // A5I3
+    {
+        vramaddr += ((t * width) + s);
+        u8 px = gpu.ReadVRAMFlat_Texture<u8>(vramaddr);
+        texpal <<= 4;
+        *outColor = gpu.ReadVRAMFlat_TexPal<u16>(texpal + ((px & 0x7) << 1));
+        *outAlpha = (px >> 3);
+        break;
+    }
+    case 7: // direct color 15bpp + 1bit alpha
+    {
+        vramaddr += (((t * width) + s) << 1);
+        *outColor = gpu.ReadVRAMFlat_Texture<u16>(vramaddr);
+        *outAlpha = (*outColor & 0x8000) ? 31 : 0;
+        break;
+    }
+    default:
+        *outColor = 0; *outAlpha = 0;
+    }
+}
+
+// Канонический декод в RGBA (без записи PNG)
+bool GLRenderer::Decode3DTextureToRGBA(const GPU& gpu, u32 texparam, u32 texpal,
+                                  std::vector<uint8_t>& rgba,
+                                  int& outW, int& outH, u32& outFmt)
+{
+    uint32_t fmt = (texparam >> 26) & 7;
+    if (fmt == 0) return false;
+
+    int w = 8 << ((texparam >> 20) & 7);
+    int h = 8 << ((texparam >> 23) & 7);
+    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return false;
+
+    rgba.assign(w * h * 4, 0);
+
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            // (s,t) берём по центру texel: 4.12 fixed = (x<<4,y<<4)
+            uint16_t col15 = 0;
+            uint8_t  a5    = 0;
+            TextureLookup_CPU(gpu, texparam, texpal, (s16)(x<<4), (s16)(y<<4), &col15, &a5);
+
+            uint8_t r5 = (col15      ) & 0x1F;
+            uint8_t g5 = (col15 >>  5) & 0x1F;
+            uint8_t b5 = (col15 >> 10) & 0x1F;
+
+            uint8_t r = (r5 << 3) | (r5 >> 2);
+            uint8_t g = (g5 << 3) | (g5 >> 2);
+            uint8_t b = (b5 << 3) | (b5 >> 2);
+            uint8_t a = (uint8_t)((a5 * 255) / 31); // как у вас
+
+            int off = (y * w + x) * 4;
+            rgba[off + 0] = r;
+            rgba[off + 1] = g;
+            rgba[off + 2] = b;
+            rgba[off + 3] = a;
+        }
+    }
+
+    outW   = w;
+    outH   = h;
+    outFmt = fmt;
+    return true;
+}
 
 void GLRenderer::RenderFrame(GPU& gpu)
 {
+    // как в софте
+    auto textureDirty = gpu.VRAMDirty_Texture.DeriveState(gpu.VRAMMap_Texture, gpu);
+    auto texPalDirty  = gpu.VRAMDirty_TexPal.DeriveState(gpu.VRAMMap_TexPal, gpu);
+    gpu.MakeVRAMFlat_TextureCoherent(textureDirty);
+    gpu.MakeVRAMFlat_TexPalCoherent(texPalDirty);
+
+    if (gEnableTexReplace) {
+        ClearBindings();
+    }
+    
+    if (gEnable3DTexDump || gEnableTexReplace) {
+        static thread_local std::unordered_set<uint64_t> seenFrame;
+        seenFrame.clear();
+
+        EnsureDump3DDir();
+
+        for (u32 i = 0; i < gpu.GPU3D.RenderNumPolygons; i++) {
+            auto* p = gpu.GPU3D.RenderPolygonRAM[i];
+            if (p->Degenerate) continue;
+
+            u32 texparam = p->TexParam;
+            u32 fmt = (texparam >> 26) & 7;
+            if (fmt == 0) continue;
+
+            u32 vramaddr = (texparam & 0xFFFF) << 3;
+
+            // уникальность в кадре (vramaddr+texparam+texpal важно!)
+            uint64_t key = (uint64_t)vramaddr
+                        ^ (uint64_t)texparam * 0x9e3779b185ebca87ULL
+                        ^ (uint64_t)p->TexPalette * 0xC2B2AE3D27D4EB4FULL;
+            if (!seenFrame.insert(key).second) continue;
+
+            // декод в RGBA (см. пункт 6)
+            std::vector<uint8_t> rgba; int w=0,h=0; u32 f=0;
+            if (!Decode3DTextureToRGBA(gpu, texparam, p->TexPalette, rgba, w, h, f)) continue;
+
+            uint64_t h64 = fnv1a64_quarterTL_rgba(rgba.data(), w, h);
+
+            if (gEnableTexReplace) {
+                if (auto rep = FindOrLoadByHash(h64, f, w, h)) {
+                    BindReplacement(vramaddr, texparam, p->TexPalette, rep);
+                }
+            }
+
+            if (gEnable3DTexDump) {
+                // чтобы не забивать дублями — учти формат/размер в сигнатуре
+                uint64_t sig = h64 ^ (uint64_t(f) << 56)
+                                    ^ (uint64_t(uint16_t(w)) << 32)
+                                    ^ (uint64_t(uint16_t(h)) << 16);
+
+                if (!gSeen3DTex.insert(sig).second) continue;
+
+                char fname[256];
+                std::snprintf(fname, sizeof(fname),
+                            "text_replace/dump/%016llX_fmt%u_%dx%d.png",
+                            (unsigned long long)h64, f, w, h);
+                stbi_write_png(fname, w, h, 4, rgba.data(), w*4);
+            }
+        }
+    }
+
     CurShaderID = -1;
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
@@ -1171,9 +1640,8 @@ void GLRenderer::RenderFrame(GPU& gpu)
     ShaderConfig.uFogShift = gpu.GPU3D.RenderFogShift;
 
     glBindBuffer(GL_UNIFORM_BUFFER, ShaderConfigUBO);
-    void* unibuf = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
-    if (unibuf) memcpy(unibuf, &ShaderConfig, sizeof(ShaderConfig));
-    glUnmapBuffer(GL_UNIFORM_BUFFER);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(ShaderConfig), nullptr, GL_STREAM_DRAW); // orphan
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ShaderConfig), &ShaderConfig);
 
     // SUCKY!!!!!!!!!!!!!!!!!!
     // TODO: detect when VRAM blocks are modified!
@@ -1274,13 +1742,18 @@ void GLRenderer::RenderFrame(GPU& gpu)
         NumOpaqueFinalPolys = firsttrans;
 
         BuildPolygons(&PolygonList[0], npolys);
+        
+        // VBO (orphan + один SubData)
         glBindBuffer(GL_ARRAY_BUFFER, VertexBufferID);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, NumVertices*7*4, VertexBuffer);
+        GLsizeiptr vbytes = NumVertices * 7 * 4;
+        glBufferData(GL_ARRAY_BUFFER, vbytes, nullptr, GL_STREAM_DRAW); // orphan
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vbytes, VertexBuffer);
 
-        // bind to access the index buffer
-        glBindVertexArray(VertexArrayID);
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, NumIndices * 2, IndexBuffer);
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, EdgeIndicesOffset * 2, NumEdgeIndices * 2, IndexBuffer + EdgeIndicesOffset);
+        // IBO (orphan + один SubData на весь используемый диапазон)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, IndexBufferID);
+        GLsizeiptr ibytes = (EdgeIndicesOffset + NumEdgeIndices) * sizeof(u16);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ibytes, nullptr, GL_STREAM_DRAW); // orphan
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, ibytes, IndexBuffer);
 
         RenderSceneChunk(gpu.GPU3D, 0, 192);
     }

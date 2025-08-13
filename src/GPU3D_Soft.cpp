@@ -23,6 +23,13 @@
 #include <string.h>
 #include "NDS.h"
 #include "GPU.h"
+#include <set>
+#include <cmath>
+#include "stb_image_write.h"
+
+#include <unordered_set>
+#include <tuple>       // для std::tie
+#include <mutex>       // для std::once_flag
 
 namespace melonDS
 {
@@ -451,7 +458,9 @@ u32 SoftRenderer::AlphaBlend(const GPU3D& gpu3d, u32 srccolor, u32 dstcolor, u32
     return srcR | (srcG << 8) | (srcB << 16) | (dstalpha << 24);
 }
 
-u32 SoftRenderer::RenderPixel(const GPU& gpu, const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const
+u32 SoftRenderer::RenderPixel(const GPU& gpu, const Polygon* polygon,
+                              u8 vr, u8 vg, u8 vb, s16 s, s16 t,
+                              const ReplacementTex* repl) const
 {
     u8 r, g, b, a;
 
@@ -485,14 +494,66 @@ u32 SoftRenderer::RenderPixel(const GPU& gpu, const Polygon* polygon, u8 vr, u8 
 
     if ((gpu.GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0))
     {
+        u16 tcolor; u8 talpha;
         u8 tr, tg, tb;
 
-        u16 tcolor; u8 talpha;
-        TextureLookup(gpu, polygon->TexParam, polygon->TexPalette, s, t, &tcolor, &talpha);
+        bool usedRepl = false;
+        if (repl) {
+            // --- обёртка/повтор как в TextureLookup (интегральные координаты DS) ---
+            const u32 texparam = polygon->TexParam;
+            int w = 8 << ((texparam >> 20) & 7);
+            int h = 8 << ((texparam >> 23) & 7);
 
-        tr = (tcolor << 1) & 0x3E; if (tr) tr++;
-        tg = (tcolor >> 4) & 0x3E; if (tg) tg++;
-        tb = (tcolor >> 9) & 0x3E; if (tb) tb++;
+            int si = s >> 4;   // DS-texel
+            int ti = t >> 4;
+
+            auto wrap = [](int val, int size, bool wrapEnable, bool mirrorEnable) {
+                if (wrapEnable) {
+                    if (mirrorEnable) {
+                        // зеркальный repeat
+                        if (val & size) val = (size-1) - (val & (size-1));
+                        else            val = (val & (size-1));
+                    } else {
+                        val &= (size-1);
+                    }
+                } else {
+                    if (val < 0) val = 0;
+                    else if (val >= size) val = size-1;
+                }
+                return val;
+            };
+
+            bool wrapS   = (texparam & (1<<16));
+            bool wrapT   = (texparam & (1<<17));
+            bool mirrorS = (texparam & (1<<18));
+            bool mirrorT = (texparam & (1<<19));
+            si = wrap(si, w, wrapS, mirrorS);
+            ti = wrap(ti, h, wrapT, mirrorT);
+
+            // --- маппинг в hi-res (nearest по центрам DS-текселей) ---
+            int rx = (int)std::lround((si + 0.5f) * repl->sx - 0.5f);
+            int ry = (int)std::lround((ti + 0.5f) * repl->sy - 0.5f);
+            if (rx < 0) rx = 0; if (ry < 0) ry = 0;
+            if (rx >= repl->w) rx = repl->w - 1;
+            if (ry >= repl->h) ry = repl->h - 1;
+
+            const uint8_t* px = &repl->rgba[(ry * repl->w + rx) * 4];
+            // 8bit -> 6bit как в пайплайне рендера
+            tr = (uint8_t)((px[0] * 63 + 127) / 255);
+            tg = (uint8_t)((px[1] * 63 + 127) / 255);
+            tb = (uint8_t)((px[2] * 63 + 127) / 255);
+            talpha = (uint8_t)((px[3] * 31 + 127) / 255);
+
+            usedRepl = true;
+        }
+
+        if (!usedRepl) {
+            // штатный путь
+            TextureLookup(gpu, polygon->TexParam, polygon->TexPalette, s, t, &tcolor, &talpha);
+            tr = (tcolor << 1) & 0x3E; if (tr) tr++;
+            tg = (tcolor >> 4) & 0x3E; if (tg) tg++;
+            tb = (tcolor >> 9) & 0x3E; if (tb) tb++;
+        }
 
         if (blendmode & 0x1)
         {
@@ -1151,7 +1212,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(gpu, polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = RenderPixel(gpu, polygon, vr>>3, vg>>3, vb>>3, s, t, rp->ReplTex);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1247,7 +1308,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(gpu, polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = RenderPixel(gpu, polygon, vr>>3, vg>>3, vb>>3, s, t, rp->ReplTex);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1339,7 +1400,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(gpu, polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = RenderPixel(gpu, polygon, vr>>3, vg>>3, vb>>3, s, t, rp->ReplTex);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1706,33 +1767,156 @@ void SoftRenderer::ClearBuffers(const GPU& gpu)
     }
 }
 
+// Канонический декод в RGBA (без записи PNG)
+bool SoftRenderer::Decode3DTextureToRGBA(const GPU& gpu,
+                                         uint32_t texparam,
+                                         uint32_t texpal,
+                                         std::vector<uint8_t>& rgba,
+                                         int& outW, int& outH, uint32_t& outFmt) const
+{
+    uint32_t fmt = (texparam >> 26) & 7;
+    if (fmt == 0) return false;
+
+    int w = 8 << ((texparam >> 20) & 7);
+    int h = 8 << ((texparam >> 23) & 7);
+    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return false;
+
+    rgba.assign(w * h * 4, 0);
+
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            // (s,t) берём по центру texel: 4.12 fixed = (x<<4,y<<4)
+            uint16_t col15 = 0;
+            uint8_t  a5    = 0;
+            this->TextureLookup(gpu, texparam, texpal,
+                                (int16_t)(x << 4), (int16_t)(y << 4),
+                                &col15, &a5);
+
+            uint8_t r5 = (col15      ) & 0x1F;
+            uint8_t g5 = (col15 >>  5) & 0x1F;
+            uint8_t b5 = (col15 >> 10) & 0x1F;
+
+            uint8_t r = (r5 << 3) | (r5 >> 2);
+            uint8_t g = (g5 << 3) | (g5 >> 2);
+            uint8_t b = (b5 << 3) | (b5 >> 2);
+            uint8_t a = (uint8_t)((a5 * 255) / 31); // как у вас
+
+            int off = (y * w + x) * 4;
+            rgba[off + 0] = r;
+            rgba[off + 1] = g;
+            rgba[off + 2] = b;
+            rgba[off + 3] = a;
+        }
+    }
+
+    outW   = w;
+    outH   = h;
+    outFmt = fmt;
+    return true;
+}
+
 void SoftRenderer::RenderPolygons(const GPU& gpu, bool threaded, Polygon** polygons, int npolys)
 {
-    int j = 0;
-    for (int i = 0; i < npolys; i++)
-    {
+    GPU& ngpu = const_cast<GPU&>(gpu);
+    auto texDirty = ngpu.VRAMDirty_Texture.DeriveState(ngpu.VRAMMap_Texture, ngpu);
+    auto palDirty = ngpu.VRAMDirty_TexPal.DeriveState(ngpu.VRAMMap_TexPal, ngpu);
+    ngpu.MakeVRAMFlat_TextureCoherent(texDirty);
+    ngpu.MakeVRAMFlat_TexPalCoherent(palDirty);
+
+    ClearBindings();
+
+    // ---- PASS 1: уникальные текстуры кадра -> поиск замены + (опц.) дамп
+    struct Key {
+        u32 vram, texparam, texpal;
+        bool operator==(const Key& o) const noexcept {
+            return vram==o.vram && texparam==o.texparam && texpal==o.texpal;
+        }
+    };
+    struct KeyHash {
+        size_t operator()(const Key& k) const noexcept {
+            uint64_t h=1469598103934665603ULL;
+            auto mix=[&](u32 v){ h^=v; h*=1099511628211ULL; };
+            mix(k.vram); mix(k.texparam); mix(k.texpal);
+            return (size_t)h;
+        }
+    };
+
+    std::unordered_set<Key, KeyHash> seen;
+    seen.reserve(npolys*2);
+
+    if (gEnableTexReplace || gEnable3DTexDump) {
+        EnsureDump3DDir(); // если дамп включён, позаботься о каталоге
+
+        for (int i = 0; i < npolys; ++i) {
+            Polygon* p = polygons[i];
+            if (!p || p->Degenerate) continue;
+
+            u32 texparam = p->TexParam;
+            u32 fmt = (texparam >> 26) & 7;
+            if (fmt == 0) continue;
+
+            u32 vramaddr = (texparam & 0xFFFF) << 3;
+            Key k{ vramaddr, texparam, p->TexPalette };
+            if (!seen.insert(k).second) continue; // дедуп в кадре
+
+            std::vector<uint8_t> rgba;
+            int w=0,h=0; u32 f=0;
+            if (!Decode3DTextureToRGBA(gpu, texparam, p->TexPalette, rgba, w, h, f))
+                continue;
+
+            uint64_t h64 = fnv1a64_quarterTL_rgba(rgba.data(), w, h);
+
+            if (gEnableTexReplace) {
+                if (auto R = FindOrLoadByHash(h64, f, w, h)) {
+                    BindReplacement(vramaddr, texparam, p->TexPalette, R);
+                }
+            }
+
+            if (gEnable3DTexDump) {
+                uint64_t sig = h64
+                             ^ (uint64_t(f) << 56)
+                             ^ (uint64_t((u16)w) << 32)
+                             ^ (uint64_t((u16)h) << 16);
+                if (gSeen3DTex.insert(sig).second) {
+                    char fname[256];
+                    std::snprintf(fname, sizeof(fname),
+                        "text_replace/dump/%016llX_fmt%u_%dx%d.png",
+                        (unsigned long long)h64, f, w, h);
+                    stbi_write_png(fname, w, h, 4, rgba.data(), w*4);
+                }
+            }
+        }
+    }
+
+    // ---- PASS 2: собираем PolygonList и проставляем ReplTex
+    int count = 0;
+    for (int i = 0; i < npolys; ++i) {
         if (polygons[i]->Degenerate) continue;
-        SetupPolygon(&PolygonList[j++], polygons[i]);
+
+        SetupPolygon(&PolygonList[count], polygons[i]);
+
+        u32 texparam = polygons[i]->TexParam;
+        u32 vramaddr = (texparam & 0xFFFF) << 3;
+        auto R = GetBound(vramaddr, texparam, polygons[i]->TexPalette);
+        PolygonList[count].ReplTex = R ? R.get() : nullptr;
+
+        ++count;
     }
 
-    RenderScanline(gpu, 0, j);
-
-    for (s32 y = 1; y < 192; y++)
-    {
-        RenderScanline(gpu, y, j);
+    // ---- рендер
+    RenderScanline(gpu, 0, count);
+    for (s32 y = 1; y < 192; y++) {
+        RenderScanline(gpu, y, count);
         ScanlineFinalPass(gpu.GPU3D, y-1);
-
-        if (threaded)
-            // Notify the main thread that we're done with a scanline.
-            Platform::Semaphore_Post(Sema_ScanlineCount);
+        if (threaded) Platform::Semaphore_Post(Sema_ScanlineCount);
     }
-
     ScanlineFinalPass(gpu.GPU3D, 191);
-
-    if (threaded)
-        // If this renderer is threaded, notify the main thread that we're done with the frame.
-        Platform::Semaphore_Post(Sema_ScanlineCount);
+    
+    if (threaded) Platform::Semaphore_Post(Sema_ScanlineCount);
 }
+
 
 void SoftRenderer::VCount144(GPU& gpu)
 {

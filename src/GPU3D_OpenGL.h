@@ -22,6 +22,7 @@
 #include "GPU3D.h"
 #include "GPU_OpenGL.h"
 #include "OpenGLSupport.h"
+#include "TexReplace.h"
 
 namespace melonDS
 {
@@ -50,6 +51,10 @@ public:
 
     void BindOutputTexture(int buffer) override;
 
+    bool Decode3DTextureToRGBA(const GPU& gpu, u32 texparam, u32 texpal,
+                                  std::vector<uint8_t>& rgba,
+                                  int& outW, int& outH, u32& outFmt);
+
     static std::unique_ptr<GLRenderer> New() noexcept;
 private:
     // Used by New()
@@ -70,8 +75,23 @@ private:
         u32 NumEdgeIndices;
         u32 EdgeIndicesOffset;
 
+        const ReplacementTex* ReplTex = nullptr; // указатель из менеджера (может быть nullptr)
+
         u32 RenderKey;
     };
+
+    // новые поля (минимум, без ломки исходных структур)
+    GLuint ReplFallbackTex = 0;         // 1x1 RGBA8, всегда валидная текстура для unit 2
+    mutable GLuint BoundReplTex = 0;    // кэш последнего привязанного GL tex на unit 2
+
+    // локации uni (по индексам текущего shader flags; исходный массив RenderShader[16] сохраняем)
+    GLint ReplSizeLoc[16] = { -1 };
+    GLint ReplUseLoc [16] = { -1 };
+
+    // хелпер
+    void ApplyReplUniformsForBatch(const RendererPolygon* rp) const;
+
+    inline void ApplyReplUniforms(u32 flags, const RendererPolygon* rp) const;
 
     GLCompositor CurGLCompositor;
     RendererPolygon PolygonList[2048] {};

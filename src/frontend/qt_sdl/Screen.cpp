@@ -105,6 +105,13 @@ ScreenPanel::ScreenPanel(QWidget* parent) : QWidget(parent)
     splashText[2].color = 0;
     splashText[2].rendered = false;
     splashText[2].rainbowstart = -1;
+
+    strncpy(splashText[3].text, "Customized by AJA", 256);
+    splashText[3].id = 0x80000003;
+    splashText[3].color = 0;
+    splashText[3].rendered = false;
+    splashText[3].rainbowstart = -1;
+
 }
 
 ScreenPanel::~ScreenPanel()
@@ -679,7 +686,7 @@ void ScreenPanel::osdUpdate()
     int rainbowinc = -1;
     bool needrecalc = false;
 
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
     {
         if (!splashText[i].rendered)
         {
@@ -733,13 +740,23 @@ void ScreenPanel::calcSplashLayout()
         splashPos[1].setY(basey);
     }
 
-    // bottom text
+    // bottom area under the logo
+    int bottomTop = ylogo + kLogoWidth;
+    int bottomH   = h - bottomTop;
+    int gap = 8;
+
+    int totalH = splashText[2].bitmap.height() + gap + splashText[3].bitmap.height();
+    int y2 = bottomTop + (bottomH - totalH)/2;
+
     splashPos[2].setX((w - splashText[2].bitmap.width()) / 2);
-    splashPos[2].setY(ylogo + kLogoWidth + ((ylogo - splashText[2].bitmap.height()) / 2));
+    splashPos[2].setY(y2);
+
+    splashPos[3].setX((w - splashText[3].bitmap.width()) / 2);
+    splashPos[3].setY(y2 + splashText[2].bitmap.height() + gap);
 
     // logo
-    splashPos[3].setX(xlogo);
-    splashPos[3].setY(ylogo);
+    splashPos[4].setX(xlogo);
+    splashPos[4].setY(ylogo);
 
     osdMutex.unlock();
 }
@@ -816,9 +833,9 @@ void ScreenPanelNative::paintEvent(QPaintEvent* event)
         // splashscreen
         osdMutex.lock();
 
-        painter.drawPixmap(QRect(splashPos[3], QSize(kLogoWidth, kLogoWidth)), splashLogo);
+        painter.drawPixmap(QRect(splashPos[4], QSize(kLogoWidth, kLogoWidth)), splashLogo);
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 4; i++)
             painter.drawImage(splashPos[i], splashText[i].bitmap);
 
         osdMutex.unlock();
@@ -1184,13 +1201,13 @@ void ScreenPanelGL::drawScreenGL()
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         glBindTexture(GL_TEXTURE_2D, logoTexture);
-        glUniform2i(osdPosULoc, splashPos[3].x(), splashPos[3].y());
+        glUniform2i(osdPosULoc, splashPos[4].x(), splashPos[4].y());
         glUniform2i(osdSizeULoc, kLogoWidth, kLogoWidth);
         glDrawArrays(GL_TRIANGLES, 0, 2*3);
 
         glUniform1f(osdTexScaleULoc, 1.0);
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 4; i++)
         {
             OSDItem& item = splashText[i];
 

@@ -243,23 +243,28 @@ flat out ivec3 fPolygonAttr;
 const char* kRenderFSCommon = R"(
 
 uniform usampler2D TexMem;
-uniform sampler2D TexPalMem;
+uniform sampler2D  TexPalMem;
+
+// --- новые униформы для замены
+uniform int        uUseRepl;    // 0/1
+uniform sampler2D  ReplTex;     // texture unit 2
+uniform vec2       ReplSize;    // (W,H) заменённой текстуры
 
 layout(std140) uniform uConfig
 {
-    vec2 uScreenSize;
-    int uDispCnt;
-    vec4 uToonColors[32];
-    vec4 uEdgeColors[8];
-    vec4 uFogColor;
-    float uFogDensity[34];
-    int uFogOffset;
-    int uFogShift;
+    vec2  uScreenSize;
+    int   uDispCnt;
+    vec4  uToonColors[32];
+    vec4  uEdgeColors[8];
+    vec4  uFogColor;
+    float uFogDensity[34]; // если у тебя тут vec4[34] — оставь как в оригинале
+    int   uFogOffset;
+    int   uFogShift;
 };
 
 smooth in vec4 fColor;
-smooth in vec2 fTexcoord;
-flat in ivec3 fPolygonAttr;
+smooth in vec2 fTexcoord;      // ожидается 4.12 fixed (как в существующем коде)
+flat   in ivec3 fPolygonAttr;  // .y = TexParam, .z = TexPalette
 
 out vec4 oColor;
 out vec4 oAttr;
@@ -457,19 +462,29 @@ vec4 TextureFetch_Direct(ivec2 addr, ivec4 st, int wrapmode)
 
 vec4 TextureLookup_Nearest(vec2 st)
 {
-    int attr = int(fPolygonAttr.y);
+    int attr    = int(fPolygonAttr.y);
     int paladdr = int(fPolygonAttr.z);
-
-    float alpha0;
-    if ((attr & (1<<29)) != 0) alpha0 = 0.0;
-    else                       alpha0 = 1.0;
 
     int tw = 8 << ((attr >> 20) & 0x7);
     int th = 8 << ((attr >> 23) & 0x7);
-    ivec4 st_full = ivec4(ivec2(st), tw, th);
 
-    ivec2 vramaddr = ivec2((attr & 0xFFFF) << 3, paladdr);
+    int si = int(floor(st.x));
+    int ti = int(floor(st.y));
+
     int wrapmode = (attr >> 16);
+
+    if (uUseRepl != 0)
+    {
+        float tw = float(8 << ((attr >> 20) & 7));
+        float th = float(8 << ((attr >> 23) & 7));
+        // fTexcoord уже в единицах DS-текселя (см. VS: /16.0)
+        vec2 uv = fTexcoord / vec2(tw, th);   // непрерывные uv
+        return texture(ReplTex, uv);          // и GL_LINEAR для MAG
+    }
+
+    float alpha0 = ((attr & (1<<29)) != 0) ? 0.0 : 1.0;
+    ivec4 st_full  = ivec4(si, ti, tw, th);
+    ivec2 vramaddr = ivec2((attr & 0xFFFF) << 3, paladdr);
 
     int type = (attr >> 26) & 0x7;
     if      (type == 5) return TextureFetch_Compressed(vramaddr, st_full, wrapmode);
@@ -481,114 +496,84 @@ vec4 TextureLookup_Nearest(vec2 st)
     else                return TextureFetch_Direct    (vramaddr, st_full, wrapmode);
 }
 
-vec4 TextureLookup_Linear(vec2 texcoord)
+vec4 TextureLookup_Linear(vec2 st)
 {
-    ivec2 intpart = ivec2(texcoord);
-    vec2 fracpart = fract(texcoord);
-
-    int attr = int(fPolygonAttr.y);
+    int attr    = int(fPolygonAttr.y);
     int paladdr = int(fPolygonAttr.z);
-
-    float alpha0;
-    if ((attr & (1<<29)) != 0) alpha0 = 0.0;
-    else                       alpha0 = 1.0;
 
     int tw = 8 << ((attr >> 20) & 0x7);
     int th = 8 << ((attr >> 23) & 0x7);
-    ivec4 st_full = ivec4(intpart, tw, th);
-
-    ivec2 vramaddr = ivec2((attr & 0xFFFF) << 3, paladdr);
     int wrapmode = (attr >> 16);
 
-    vec4 A, B, C, D;
+    int si = int(floor(st.x));
+    int ti = int(floor(st.y));
+    float fx = fract(st.x);
+    float fy = fract(st.y);
+
+    if (uUseRepl != 0)
+    {
+        int s0 = TexcoordWrap(si+0, tw, wrapmode>>0);
+        int s1 = TexcoordWrap(si+1, tw, wrapmode>>0);
+        int t0 = TexcoordWrap(ti+0, th, wrapmode>>1);
+        int t1 = TexcoordWrap(ti+1, th, wrapmode>>1);
+
+        float sx = ReplSize.x / float(tw);
+        float sy = ReplSize.y / float(th);
+
+        vec2 uv00 = (vec2(floor((float(s0)+0.5)*sx), floor((float(t0)+0.5)*sy)) + 0.5) / ReplSize;
+        vec2 uv10 = (vec2(floor((float(s1)+0.5)*sx), floor((float(t0)+0.5)*sy)) + 0.5) / ReplSize;
+        vec2 uv01 = (vec2(floor((float(s0)+0.5)*sx), floor((float(t1)+0.5)*sy)) + 0.5) / ReplSize;
+        vec2 uv11 = (vec2(floor((float(s1)+0.5)*sx), floor((float(t1)+0.5)*sy)) + 0.5) / ReplSize;
+
+        vec4 A = texture(ReplTex, uv00);
+        vec4 B = texture(ReplTex, uv10);
+        vec4 C = texture(ReplTex, uv01);
+        vec4 D = texture(ReplTex, uv11);
+
+        vec4 AB = (A.a < (0.5/31.0) && B.a < (0.5/31.0)) ? vec4(0.0) : mix(A, B, fx);
+        vec4 CD = (C.a < (0.5/31.0) && D.a < (0.5/31.0)) ? vec4(0.0) : mix(C, D, fx);
+        return (AB.a < (0.5/31.0) && CD.a < (0.5/31.0)) ? vec4(0.0) : mix(AB, CD, fy);
+    }
+
+    // DS-путь (как у тебя), только ст собираем правильно:
+    float alpha0 = ((attr & (1<<29)) != 0) ? 0.0 : 1.0;
+    ivec2 vramaddr = ivec2((attr & 0xFFFF) << 3, paladdr);
+    ivec4 st_full  = ivec4(si, ti, tw, th);
+
+    vec4 A,B,C,D;
     int type = (attr >> 26) & 0x7;
-    if (type == 5)
-    {
-        A = TextureFetch_Compressed(vramaddr, st_full                 , wrapmode);
-        B = TextureFetch_Compressed(vramaddr, st_full + ivec4(1,0,0,0), wrapmode);
-        C = TextureFetch_Compressed(vramaddr, st_full + ivec4(0,1,0,0), wrapmode);
-        D = TextureFetch_Compressed(vramaddr, st_full + ivec4(1,1,0,0), wrapmode);
-    }
-    else if (type == 2)
-    {
-        A = TextureFetch_I2(vramaddr, st_full                 , wrapmode, alpha0);
-        B = TextureFetch_I2(vramaddr, st_full + ivec4(1,0,0,0), wrapmode, alpha0);
-        C = TextureFetch_I2(vramaddr, st_full + ivec4(0,1,0,0), wrapmode, alpha0);
-        D = TextureFetch_I2(vramaddr, st_full + ivec4(1,1,0,0), wrapmode, alpha0);
-    }
-    else if (type == 3)
-    {
-        A = TextureFetch_I4(vramaddr, st_full                 , wrapmode, alpha0);
-        B = TextureFetch_I4(vramaddr, st_full + ivec4(1,0,0,0), wrapmode, alpha0);
-        C = TextureFetch_I4(vramaddr, st_full + ivec4(0,1,0,0), wrapmode, alpha0);
-        D = TextureFetch_I4(vramaddr, st_full + ivec4(1,1,0,0), wrapmode, alpha0);
-    }
-    else if (type == 4)
-    {
-        A = TextureFetch_I8(vramaddr, st_full                 , wrapmode, alpha0);
-        B = TextureFetch_I8(vramaddr, st_full + ivec4(1,0,0,0), wrapmode, alpha0);
-        C = TextureFetch_I8(vramaddr, st_full + ivec4(0,1,0,0), wrapmode, alpha0);
-        D = TextureFetch_I8(vramaddr, st_full + ivec4(1,1,0,0), wrapmode, alpha0);
-    }
-    else if (type == 1)
-    {
-        A = TextureFetch_A3I5(vramaddr, st_full                 , wrapmode);
-        B = TextureFetch_A3I5(vramaddr, st_full + ivec4(1,0,0,0), wrapmode);
-        C = TextureFetch_A3I5(vramaddr, st_full + ivec4(0,1,0,0), wrapmode);
-        D = TextureFetch_A3I5(vramaddr, st_full + ivec4(1,1,0,0), wrapmode);
-    }
-    else if (type == 6)
-    {
-        A = TextureFetch_A5I3(vramaddr, st_full                 , wrapmode);
-        B = TextureFetch_A5I3(vramaddr, st_full + ivec4(1,0,0,0), wrapmode);
-        C = TextureFetch_A5I3(vramaddr, st_full + ivec4(0,1,0,0), wrapmode);
-        D = TextureFetch_A5I3(vramaddr, st_full + ivec4(1,1,0,0), wrapmode);
-    }
-    else
-    {
-        A = TextureFetch_Direct(vramaddr, st_full                 , wrapmode);
-        B = TextureFetch_Direct(vramaddr, st_full + ivec4(1,0,0,0), wrapmode);
-        C = TextureFetch_Direct(vramaddr, st_full + ivec4(0,1,0,0), wrapmode);
-        D = TextureFetch_Direct(vramaddr, st_full + ivec4(1,1,0,0), wrapmode);
-    }
+    if (type == 5) { A=TextureFetch_Compressed(vramaddr, st_full, wrapmode);
+                     B=TextureFetch_Compressed(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                     C=TextureFetch_Compressed(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                     D=TextureFetch_Compressed(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+    else if (type == 2) { A=TextureFetch_I2(vramaddr, st_full, wrapmode, alpha0);
+                          B=TextureFetch_I2(vramaddr, st_full+ivec4(1,0,0,0), wrapmode, alpha0);
+                          C=TextureFetch_I2(vramaddr, st_full+ivec4(0,1,0,0), wrapmode, alpha0);
+                          D=TextureFetch_I2(vramaddr, st_full+ivec4(1,1,0,0), wrapmode, alpha0); }
+    else if (type == 3) { A=TextureFetch_I4(vramaddr, st_full, wrapmode, alpha0);
+                          B=TextureFetch_I4(vramaddr, st_full+ivec4(1,0,0,0), wrapmode, alpha0);
+                          C=TextureFetch_I4(vramaddr, st_full+ivec4(0,1,0,0), wrapmode, alpha0);
+                          D=TextureFetch_I4(vramaddr, st_full+ivec4(1,1,0,0), wrapmode, alpha0); }
+    else if (type == 4) { A=TextureFetch_I8(vramaddr, st_full, wrapmode, alpha0);
+                          B=TextureFetch_I8(vramaddr, st_full+ivec4(1,0,0,0), wrapmode, alpha0);
+                          C=TextureFetch_I8(vramaddr, st_full+ivec4(0,1,0,0), wrapmode, alpha0);
+                          D=TextureFetch_I8(vramaddr, st_full+ivec4(1,1,0,0), wrapmode, alpha0); }
+    else if (type == 1) { A=TextureFetch_A3I5(vramaddr, st_full, wrapmode);
+                          B=TextureFetch_A3I5(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                          C=TextureFetch_A3I5(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                          D=TextureFetch_A3I5(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+    else if (type == 6) { A=TextureFetch_A5I3(vramaddr, st_full, wrapmode);
+                          B=TextureFetch_A5I3(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                          C=TextureFetch_A5I3(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                          D=TextureFetch_A5I3(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+    else                 { A=TextureFetch_Direct(vramaddr, st_full, wrapmode);
+                          B=TextureFetch_Direct(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                          C=TextureFetch_Direct(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                          D=TextureFetch_Direct(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
 
-    float fx = fracpart.x;
-    vec4 AB;
-    if (A.a < (0.5/31.0) && B.a < (0.5/31.0))
-        AB = vec4(0);
-    else
-    {
-        //if (A.a < (0.5/31.0) || B.a < (0.5/31.0))
-        //    fx = step(0.5, fx);
-
-        AB = mix(A, B, fx);
-    }
-
-    fx = fracpart.x;
-    vec4 CD;
-    if (C.a < (0.5/31.0) && D.a < (0.5/31.0))
-        CD = vec4(0);
-    else
-    {
-        //if (C.a < (0.5/31.0) || D.a < (0.5/31.0))
-        //    fx = step(0.5, fx);
-
-        CD = mix(C, D, fx);
-    }
-
-    fx = fracpart.y;
-    vec4 ret;
-    if (AB.a < (0.5/31.0) && CD.a < (0.5/31.0))
-        ret = vec4(0);
-    else
-    {
-        //if (AB.a < (0.5/31.0) || CD.a < (0.5/31.0))
-        //    fx = step(0.5, fx);
-
-        ret = mix(AB, CD, fx);
-    }
-
-    return ret;
+    vec4 AB = (A.a < (0.5/31.0) && B.a < (0.5/31.0)) ? vec4(0.0) : mix(A, B, fx);
+    vec4 CD = (C.a < (0.5/31.0) && D.a < (0.5/31.0)) ? vec4(0.0) : mix(C, D, fx);
+    return (AB.a < (0.5/31.0) && CD.a < (0.5/31.0)) ? vec4(0.0) : mix(AB, CD, fy);
 }
 
 vec4 FinalColor()
@@ -600,48 +585,35 @@ vec4 FinalColor()
     if (blendmode == 2)
     {
         if ((uDispCnt & (1<<1)) == 0)
-        {
-            // toon
-            vec3 tooncolor = uToonColors[int(vcol.r * 31)].rgb;
-            vcol.rgb = tooncolor;
-        }
+            vcol.rgb = uToonColors[int(vcol.r * 31)].rgb; // toon
         else
-        {
-            // highlight
-            vcol.rgb = vcol.rrr;
-        }
+            vcol.rgb = vcol.rrr;                           // highlight
     }
 
+    // текстуры могут быть выключены битом дисплея/формата
     if ((((fPolygonAttr.y >> 26) & 0x7) == 0) || ((uDispCnt & (1<<0)) == 0))
     {
-        // no texture
         col = vcol;
     }
     else
     {
         vec4 tcol = TextureLookup_Nearest(fTexcoord);
         //vec4 tcol = TextureLookup_Linear(fTexcoord);
-
-        if ((blendmode & 1) != 0)
+        if ((blendmode & 1) != 0)      // decal
         {
-            // decal
-            col.rgb = (tcol.rgb * tcol.a) + (vcol.rgb * (1.0-tcol.a));
+            col.rgb = (tcol.rgb * tcol.a) + (vcol.rgb * (1.0 - tcol.a));
             col.a = vcol.a;
         }
-        else
+        else                           // modulate
         {
-            // modulate
             col = vcol * tcol;
         }
     }
 
-    if (blendmode == 2)
+    if (blendmode == 2 && (uDispCnt & (1<<1)) != 0)
     {
-        if ((uDispCnt & (1<<1)) != 0)
-        {
-            vec3 tooncolor = uToonColors[int(vcol.r * 31)].rgb;
-            col.rgb = min(col.rgb + tooncolor, 1.0);
-        }
+        vec3 tooncolor = uToonColors[int(vcol.r * 31)].rgb;
+        col.rgb = min(col.rgb + tooncolor, 1.0);
     }
 
     return col.bgra;

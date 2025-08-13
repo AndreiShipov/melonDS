@@ -23,9 +23,11 @@
 #include "Platform.h"
 #include <thread>
 #include <atomic>
+#include "TexReplace.h"
 
 namespace melonDS
 {
+struct ReplacementTex;
 class SoftRenderer : public Renderer3D
 {
 public:
@@ -44,6 +46,11 @@ public:
     void SetupRenderThread(GPU& gpu);
     void EnableRenderThread();
     void StopRenderThread();
+    bool Decode3DTextureToRGBA(const GPU& gpu,
+                                         uint32_t texparam,
+                                         uint32_t texpal,
+                                         std::vector<uint8_t>& rgba,
+                                         int& outW, int& outH, uint32_t& outFmt) const;
 private:
     friend void GPU3D::DoSavestate(Savestate* file) noexcept;
     // Notes on the interpolator:
@@ -433,11 +440,14 @@ private:
         u32 CurVL, CurVR;
         u32 NextVL, NextVR;
 
+        const ReplacementTex* ReplTex = nullptr; // <— новое
     };
 
     RendererPolygon PolygonList[2048];
     void TextureLookup(const GPU& gpu, u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const;
-    u32 RenderPixel(const GPU& gpu, const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const;
+    u32 RenderPixel(const GPU& gpu, const Polygon* polygon,
+                              u8 vr, u8 vg, u8 vb, s16 s, s16 t,
+                              const ReplacementTex* repl) const;
     void PlotTranslucentPixel(const GPU3D& gpu3d, u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
     void SetupPolygonLeftEdge(RendererPolygon* rp, s32 y) const;
     void SetupPolygonRightEdge(RendererPolygon* rp, s32 y) const;
