@@ -84,6 +84,7 @@
 #include "CameraManager.h"
 #include "Window.h"
 #include "AboutDialog.h"
+#include "TexReplace.h"
 
 using namespace melonDS;
 
@@ -672,6 +673,18 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
             actAudioSync = menu->addAction("Audio sync");
             actAudioSync->setCheckable(true);
             connect(actAudioSync, &QAction::triggered, this, &MainWindow::onChangeAudioSync);
+
+            {
+                QMenu * submenu = menu->addMenu("Texture replace");
+
+                actDumpTextures = submenu->addAction("Dump");
+                actDumpTextures->setCheckable(true);
+                connect(actDumpTextures, &QAction::toggled, this, &MainWindow::onDumpChange);
+
+                actRestoreTextures = submenu->addAction("Mod");
+                actRestoreTextures->setCheckable(true);
+                connect(actRestoreTextures, &QAction::toggled, this, &MainWindow::onRestoreChange);
+            }
         }
         {
             QMenu * menu = menubar->addMenu("Help");
@@ -749,6 +762,8 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
         actRAMInfo->setEnabled(false);
 
         actSavestateSRAMReloc->setChecked(globalCfg.GetBool("Savestate.RelocSRAM"));
+        actDumpTextures->setChecked(globalCfg.GetBool("TexReplace.Dump"));
+        actRestoreTextures->setChecked(globalCfg.GetBool("TexReplace.Replace"));
 
         actScreenRotation[windowCfg.GetInt("ScreenRotation")]->setChecked(true);
 
@@ -2055,6 +2070,18 @@ void MainWindow::onInterfaceSettingsFinished(int res)
 void MainWindow::onChangeSavestateSRAMReloc(bool checked)
 {
     globalCfg.SetBool("Savestate.RelocSRAM", checked);
+}
+
+void MainWindow::onDumpChange(bool checked)
+{
+    melonDS::TexReplace_SetDump(checked);
+    globalCfg.SetBool("TexReplace.Dump", checked);
+}
+
+void MainWindow::onRestoreChange(bool checked)
+{
+    melonDS::TexReplace_SetReplace(checked);
+    globalCfg.SetBool("TexReplace.Replace", checked);
 }
 
 void MainWindow::onChangeScreenSize()

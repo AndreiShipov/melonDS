@@ -228,6 +228,8 @@ private slots:
     void onChangeShowOSD(bool checked);
     void onChangeLimitFramerate(bool checked);
     void onChangeAudioSync(bool checked);
+    void onDumpChange(bool checked);
+    void onRestoreChange(bool checked);
 
     void onTitleUpdate(QString title);
 
@@ -331,6 +333,8 @@ public:
     QAction* actPathSettings;
     QAction* actInterfaceSettings;
     QAction* actSavestateSRAMReloc;
+    QAction* actDumpTextures;
+    QAction* actRestoreTextures;
     QAction* actScreenSize[4];
     QActionGroup* grpScreenRotation;
     QAction* actScreenRotation[screenRot_MAX];

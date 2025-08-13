@@ -123,7 +123,7 @@ void GLRenderer::UseRenderShader(u32 flags)
     CurShaderID = flags;
 
     // Сброс дефолтов только если включена замена текстур
-    if (gEnableTexReplace)
+    if (melonDS::TexReplace_ReplaceEnabled())
     {
         // uUseRepl = 0, ReplSize = (1,1) — если униформы есть в данном шейдере
         if (ReplUseLoc[flags]  >= 0) glUniform1i(ReplUseLoc[flags], 0);
@@ -138,7 +138,7 @@ void GLRenderer::UseRenderShader(u32 flags)
             BoundReplTex = ReplFallbackTex;
         }
     }
-    // если gEnableTexReplace == false — вообще ничего не трогаем:
+    // если melonDS::TexReplace_ReplaceEnabled() == false — вообще ничего не трогаем:
     // шейдер всё равно не будет читать ReplTex (uUseRepl=0 в батчах),
     // а fallback у нас уже создан и, как правило, один раз был забинден на старте.
 }
@@ -397,7 +397,7 @@ GLRenderer::~GLRenderer()
 
 void GLRenderer::ApplyReplUniformsForBatch(const RendererPolygon* rp) const
 {
-    if (!gEnableTexReplace) return;
+    if (!melonDS::TexReplace_ReplaceEnabled()) return;
 
     // что хотим видеть в unit=2
     GLuint want = ReplFallbackTex;
@@ -528,7 +528,7 @@ void GLRenderer::SetupPolygon(GLRenderer::RendererPolygon* rp, Polygon* polygon)
     // ключ VRAM
     u32 texparam = polygon->TexParam;
     u32 fmt = (texparam >> 26) & 7;
-    if (fmt == 0 || !gEnableTexReplace) {
+    if (fmt == 0 || !melonDS::TexReplace_ReplaceEnabled()) {
         rp->ReplTex = nullptr; // у полигона нет текстуры → замены быть не может
     } else {
         u32 vramaddr = (texparam & 0xFFFF) << 3;
@@ -849,7 +849,7 @@ void GLRenderer::BuildPolygons(GLRenderer::RendererPolygon* polygons, int npolys
 
 void GLRenderer::ApplyReplUniforms(u32 flags, const RendererPolygon* rp) const
 {
-    if (!gEnableTexReplace) return;
+    if (!melonDS::TexReplace_ReplaceEnabled()) return;
     if (rp && rp->ReplTex) {
         GLuint tex = GetOrCreateGLTex(rp->ReplTex);
         glActiveTexture(GL_TEXTURE2);
@@ -870,7 +870,7 @@ void GLRenderer::ApplyReplUniforms(u32 flags, const RendererPolygon* rp) const
 int GLRenderer::RenderSinglePolygon(int i) const
 {
     const RendererPolygon* rp = &PolygonList[i];
-    if (gEnableTexReplace) {
+    if (melonDS::TexReplace_ReplaceEnabled()) {
         ApplyReplUniforms(CurShaderID, rp);
     }
 
@@ -886,7 +886,7 @@ int GLRenderer::RenderPolygonBatch(int i) const
     const u32 key = rp->RenderKey;
 
     // Если замены включены — склеиваем батчи только для одинакового ReplTex (включая nullptr)
-    const bool replFeature = gEnableTexReplace;
+    const bool replFeature = melonDS::TexReplace_ReplaceEnabled();
     const void* replKey = replFeature ? static_cast<const void*>(rp->ReplTex) : nullptr;
 
     int numpolys = 0;
@@ -1529,11 +1529,11 @@ void GLRenderer::RenderFrame(GPU& gpu)
     gpu.MakeVRAMFlat_TextureCoherent(textureDirty);
     gpu.MakeVRAMFlat_TexPalCoherent(texPalDirty);
 
-    if (gEnableTexReplace) {
+    if (melonDS::TexReplace_ReplaceEnabled()) {
         ClearBindings();
     }
-    
-    if (gEnable3DTexDump || gEnableTexReplace) {
+
+    if (melonDS::TexReplace_DumpEnabled() || melonDS::TexReplace_ReplaceEnabled()) {
         static thread_local std::unordered_set<uint64_t> seenFrame;
         seenFrame.clear();
 
@@ -1561,13 +1561,13 @@ void GLRenderer::RenderFrame(GPU& gpu)
 
             uint64_t h64 = fnv1a64_quarterTL_rgba(rgba.data(), w, h);
 
-            if (gEnableTexReplace) {
+            if (melonDS::TexReplace_ReplaceEnabled()) {
                 if (auto rep = FindOrLoadByHash(h64, f, w, h)) {
                     BindReplacement(vramaddr, texparam, p->TexPalette, rep);
                 }
             }
 
-            if (gEnable3DTexDump) {
+            if (melonDS::TexReplace_DumpEnabled()) {
                 // чтобы не забивать дублями — учти формат/размер в сигнатуре
                 uint64_t sig = h64 ^ (uint64_t(f) << 56)
                                     ^ (uint64_t(uint16_t(w)) << 32)

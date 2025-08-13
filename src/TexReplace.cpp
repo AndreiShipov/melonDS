@@ -13,6 +13,9 @@
 
 namespace melonDS {
 
+std::atomic<bool> gEnableTexReplace{false};
+std::atomic<bool> gEnable3DTexDump{false};
+
 struct ReplacementTex {
     int w = 0, h = 0;
     float sx = 1.0f, sy = 1.0f;          // масштаб: rep/original

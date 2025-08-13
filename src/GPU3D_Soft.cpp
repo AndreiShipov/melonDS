@@ -1846,7 +1846,7 @@ void SoftRenderer::RenderPolygons(const GPU& gpu, bool threaded, Polygon** polyg
     std::unordered_set<Key, KeyHash> seen;
     seen.reserve(npolys*2);
 
-    if (gEnableTexReplace || gEnable3DTexDump) {
+    if (melonDS::TexReplace_ReplaceEnabled() || melonDS::TexReplace_DumpEnabled()) {
         EnsureDump3DDir(); // если дамп включён, позаботься о каталоге
 
         for (int i = 0; i < npolys; ++i) {
@@ -1868,13 +1868,13 @@ void SoftRenderer::RenderPolygons(const GPU& gpu, bool threaded, Polygon** polyg
 
             uint64_t h64 = fnv1a64_quarterTL_rgba(rgba.data(), w, h);
 
-            if (gEnableTexReplace) {
+            if (melonDS::TexReplace_ReplaceEnabled()) {
                 if (auto R = FindOrLoadByHash(h64, f, w, h)) {
                     BindReplacement(vramaddr, texparam, p->TexPalette, R);
                 }
             }
 
-            if (gEnable3DTexDump) {
+            if (melonDS::TexReplace_DumpEnabled()) {
                 uint64_t sig = h64
                              ^ (uint64_t(f) << 56)
                              ^ (uint64_t((u16)w) << 32)

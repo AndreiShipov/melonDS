@@ -19,8 +19,15 @@
 
 namespace melonDS {
 
-static bool gEnableTexReplace = true;
-static bool gEnable3DTexDump  = true;
+// --- Флаги (одно определение в TexReplace.cpp)
+extern std::atomic<bool> gEnableTexReplace; // Restore/Replace
+extern std::atomic<bool> gEnable3DTexDump;  // Dump
+
+// Удобные геттеры/сеттеры (инлайн, без лишних зависимостей)
+inline bool TexReplace_ReplaceEnabled()  { return gEnableTexReplace.load(std::memory_order_relaxed); }
+inline bool TexReplace_DumpEnabled()     { return gEnable3DTexDump.load(std::memory_order_relaxed); }
+inline void TexReplace_SetReplace(bool v){ gEnableTexReplace.store(v, std::memory_order_relaxed); }
+inline void TexReplace_SetDump(bool v)   { gEnable3DTexDump.store(v, std::memory_order_relaxed); }
 
 static std::once_flag gDumpDirOnce;
 

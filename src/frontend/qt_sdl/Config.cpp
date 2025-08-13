@@ -225,6 +225,9 @@ LegacyEntry LegacyFile[] =
     {"ConsoleType", 0, "Emu.ConsoleType", false},
     {"DirectBoot", 1, "Emu.DirectBoot", false},
 
+    {"TexReplaceDump", 1, "TexReplace.Dump", false},
+    {"TexReplaceReplace", 1, "TexReplace.Replace", false},
+
 #ifdef JIT_ENABLED
     {"JIT_Enable", 1, "JIT.Enable", false},
     {"JIT_MaxBlockSize", 0, "JIT.MaxBlockSize", false},
