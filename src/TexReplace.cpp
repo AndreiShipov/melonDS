@@ -1,3 +1,5 @@
+#include "TexReplace.h"
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -13,14 +15,11 @@
 
 namespace melonDS {
 
-std::atomic<bool> gEnableTexReplace{false};
-std::atomic<bool> gEnable3DTexDump{false};
-
-struct ReplacementTex {
-    int w = 0, h = 0;
-    float sx = 1.0f, sy = 1.0f;          // масштаб: rep/original
-    std::vector<uint8_t> rgba;           // RGBA8888
-};
+// Удобные геттеры/сеттеры (инлайн, без лишних зависимостей)
+bool TexReplace_ReplaceEnabled()  { return gEnableTexReplace.load(std::memory_order_relaxed); }
+bool TexReplace_DumpEnabled()     { return gEnable3DTexDump.load(std::memory_order_relaxed); }
+void TexReplace_SetReplace(bool v){ gEnableTexReplace.store(v, std::memory_order_relaxed); }
+void TexReplace_SetDump(bool v)   { gEnable3DTexDump.store(v, std::memory_order_relaxed); }
 
 static std::mutex                gReplMx;
 static std::unordered_map<uint64_t, std::shared_ptr<ReplacementTex>> gByHash; // key: h64^fmt^w^h (как у тебя sig)

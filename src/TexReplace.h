@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <mutex>
 #include <cstdint>
+#include <atomic>
 
 #if __cplusplus >= 201703L
   #include <filesystem>
@@ -19,15 +20,14 @@
 
 namespace melonDS {
 
-// --- Флаги (одно определение в TexReplace.cpp)
-extern std::atomic<bool> gEnableTexReplace; // Restore/Replace
-extern std::atomic<bool> gEnable3DTexDump;  // Dump
+inline std::atomic<bool> gEnableTexReplace{false};
+inline std::atomic<bool> gEnable3DTexDump{false};
 
-// Удобные геттеры/сеттеры (инлайн, без лишних зависимостей)
-inline bool TexReplace_ReplaceEnabled()  { return gEnableTexReplace.load(std::memory_order_relaxed); }
-inline bool TexReplace_DumpEnabled()     { return gEnable3DTexDump.load(std::memory_order_relaxed); }
-inline void TexReplace_SetReplace(bool v){ gEnableTexReplace.store(v, std::memory_order_relaxed); }
-inline void TexReplace_SetDump(bool v)   { gEnable3DTexDump.store(v, std::memory_order_relaxed); }
+// удобные геттеры/сеттеры (объявления)
+bool TexReplace_ReplaceEnabled();
+void TexReplace_SetReplace(bool v);
+bool TexReplace_DumpEnabled();
+void TexReplace_SetDump(bool v);
 
 static std::once_flag gDumpDirOnce;
 
