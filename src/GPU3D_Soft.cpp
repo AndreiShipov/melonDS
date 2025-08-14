@@ -1899,8 +1899,12 @@ void SoftRenderer::RenderPolygons(const GPU& gpu, bool threaded, Polygon** polyg
 
         u32 texparam = polygons[i]->TexParam;
         u32 vramaddr = (texparam & 0xFFFF) << 3;
-        auto R = GetBound(vramaddr, texparam, polygons[i]->TexPalette);
-        PolygonList[count].ReplTex = R ? R.get() : nullptr;
+        if (melonDS::TexReplace_ReplaceEnabled()) {
+            auto R = GetBound(vramaddr, texparam, polygons[i]->TexPalette);
+            PolygonList[count].ReplTex = R ? R.get() : nullptr;
+        } else {
+            PolygonList[count].ReplTex = nullptr;
+        }
 
         ++count;
     }

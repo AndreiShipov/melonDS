@@ -117,26 +117,21 @@ void GLRenderer::UseRenderShader(u32 flags)
     if (CurShaderID == flags) return;
 
     GLuint prog = RenderShader[flags];
-    if (!prog) return; // можно заменить на assert(prog);
+    if (!prog) return;
 
     glUseProgram(prog);
     CurShaderID = flags;
 
-    // Сброс дефолтов только если включена замена текстур
-    if (melonDS::TexReplace_ReplaceEnabled())
-    {
-        // uUseRepl = 0, ReplSize = (1,1) — если униформы есть в данном шейдере
-        if (ReplUseLoc[flags]  >= 0) glUniform1i(ReplUseLoc[flags], 0);
-        if (ReplSizeLoc[flags] >= 0) glUniform2f(ReplSizeLoc[flags], 1.f, 1.f);
+    // ВСЕГДА ставим безопасные значения: замена выключена
+    if (ReplUseLoc[flags]  >= 0) glUniform1i(ReplUseLoc[flags], 0);
+    if (ReplSizeLoc[flags] >= 0) glUniform2f(ReplSizeLoc[flags], 1.f, 1.f);
 
-        // Гарантируем валидную текстуру в unit 2, но без лишних биндов
-        if (BoundReplTex != ReplFallbackTex)
-        {
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, ReplFallbackTex);
-            glActiveTexture(GL_TEXTURE0);
-            BoundReplTex = ReplFallbackTex;
-        }
+    // И подстраховка: unit 2 = fallback (на случай «залипшей» текстуры)
+    if (BoundReplTex != ReplFallbackTex) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, ReplFallbackTex);
+        glActiveTexture(GL_TEXTURE0);
+        BoundReplTex = ReplFallbackTex;
     }
     // если melonDS::TexReplace_ReplaceEnabled() == false — вообще ничего не трогаем:
     // шейдер всё равно не будет читать ReplTex (uUseRepl=0 в батчах),

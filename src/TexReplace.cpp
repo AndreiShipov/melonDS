@@ -73,6 +73,9 @@ std::shared_ptr<ReplacementTex> FindOrLoadByHash(uint64_t h64, uint32_t fmt, int
 
 std::shared_ptr<ReplacementTex> GetBound(uint32_t vramaddr, uint32_t texparam, uint32_t texpal)
 {
+    if (!TexReplace_ReplaceEnabled())     // <- добавь это
+        return nullptr;
+
     std::lock_guard<std::mutex> lk(gReplMx);
     uint64_t bk = MakeBindKey(vramaddr, texparam, texpal);
     auto it = gBind.find(bk);
