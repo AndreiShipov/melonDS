@@ -106,7 +106,7 @@ ScreenPanel::ScreenPanel(QWidget* parent) : QWidget(parent)
     splashText[2].rendered = false;
     splashText[2].rainbowstart = -1;
 
-    strncpy(splashText[3].text, "Customized by AJA", 256);
+    strncpy(splashText[3].text, "Customized by AJA (ver 2)", 256);
     splashText[3].id = 0x80000003;
     splashText[3].color = 0;
     splashText[3].rendered = false;
