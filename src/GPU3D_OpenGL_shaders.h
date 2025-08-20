@@ -496,49 +496,106 @@ vec4 TextureLookup_Nearest(vec2 st)
     else                return TextureFetch_Direct    (vramaddr, st_full, wrapmode);
 }
 
+// --- helpers для wrap/mirror/clamp в [0..1] ---
+// repeat
+float wrap_repeat(float u) {
+    return fract(u);
+}
+// mirror repeat
+float wrap_mirror(float u) {
+    float k = floor(u);
+    float f = u - k;
+    return (mod(k, 2.0) == 0.0) ? f : (1.0 - f);
+}
+
+// Обёртка одной оси с учётом режима.
+// Для clamp поджимает к центрам крайних пикселей (±0.5/size).
+float wrap_axis_px(float u, bool wrap, bool mirror, float texSize) {
+    if (wrap) {
+        return mirror ? wrap_mirror(u) : wrap_repeat(u);
+    } else {
+        float h = 0.5 / texSize;             // half texel
+        return clamp(u, h, 1.0 - h);
+    }
+}
+
+// Обёртка для двух осей сразу.
+vec2 wrap01_px(vec2 uv, int wrapmode, vec2 texSize) {
+    bool wrapS   = (wrapmode & 1) != 0;
+    bool wrapT   = (wrapmode & 2) != 0;
+    bool mirrorS = (wrapmode & 4) != 0;
+    bool mirrorT = (wrapmode & 8) != 0;
+
+    uv.x = wrap_axis_px(uv.x, wrapS, mirrorS, texSize.x);
+    uv.y = wrap_axis_px(uv.y, wrapT, mirrorT, texSize.y);
+    return uv;
+}
+
+// =================== ЛИНЕЙНАЯ ФИЛЬТРАЦИЯ ===================
 vec4 TextureLookup_Linear(vec2 st)
 {
     int attr    = int(fPolygonAttr.y);
     int paladdr = int(fPolygonAttr.z);
 
-    int tw = 8 << ((attr >> 20) & 0x7);
-    int th = 8 << ((attr >> 23) & 0x7);
-    int wrapmode = (attr >> 16);
+    // размер исходной DS-текстуры (в текселях DS)
+    float tw = float(8 << ((attr >> 20) & 7));
+    float th = float(8 << ((attr >> 23) & 7));
+    int   wrapmode = (attr >> 16);
 
-    int si = int(floor(st.x));
-    int ti = int(floor(st.y));
-    float fx = fract(st.x);
-    float fy = fract(st.y);
-
+    // ---------------------- MOD-путь ----------------------
     if (uUseRepl != 0)
     {
-        int s0 = TexcoordWrap(si+0, tw, wrapmode>>0);
-        int s1 = TexcoordWrap(si+1, tw, wrapmode>>0);
-        int t0 = TexcoordWrap(ti+0, th, wrapmode>>1);
-        int t1 = TexcoordWrap(ti+1, th, wrapmode>>1);
+        // Непрерывные uv в диапазоне [0..1] в системе координат DS (без квантования к DS-сетке)
+        vec2 uv = st / vec2(tw, th);
 
-        float sx = ReplSize.x / float(tw);
-        float sy = ReplSize.y / float(th);
+        // Переводим в «пиксельное» пространство мод-текстуры и вычисляем дробные части
+        // ReplSize = (width,height) мод-текстуры в текселях
+        vec2 p  = uv * ReplSize - 0.5;      // координата относительно центров пикселей
+        vec2 f  = fract(p);                  // веса между четырьмя соседями
+        vec2 b  = floor(p);                  // базовый целый индекс пикселя
 
-        vec2 uv00 = (vec2(floor((float(s0)+0.5)*sx), floor((float(t0)+0.5)*sy)) + 0.5) / ReplSize;
-        vec2 uv10 = (vec2(floor((float(s1)+0.5)*sx), floor((float(t0)+0.5)*sy)) + 0.5) / ReplSize;
-        vec2 uv01 = (vec2(floor((float(s0)+0.5)*sx), floor((float(t1)+0.5)*sy)) + 0.5) / ReplSize;
-        vec2 uv11 = (vec2(floor((float(s1)+0.5)*sx), floor((float(t1)+0.5)*sy)) + 0.5) / ReplSize;
+        // Центр базового пикселя в нормированных координатах
+        vec2 base = (b + 0.5) / ReplSize;
+        vec2 dx   = vec2(1.0 / ReplSize.x, 0.0);
+        vec2 dy   = vec2(0.0, 1.0 / ReplSize.y);
 
+        // Четыре соседних центра с корректной обёрткой
+        vec2 uv00 = wrap01_px(base        , wrapmode, ReplSize);
+        vec2 uv10 = wrap01_px(base + dx   , wrapmode, ReplSize);
+        vec2 uv01 = wrap01_px(base + dy   , wrapmode, ReplSize);
+        vec2 uv11 = wrap01_px(base + dx+dy, wrapmode, ReplSize);
+
+        // Четыре выборки и билинейное смешивание
         vec4 A = texture(ReplTex, uv00);
         vec4 B = texture(ReplTex, uv10);
         vec4 C = texture(ReplTex, uv01);
         vec4 D = texture(ReplTex, uv11);
 
-        vec4 AB = (A.a < (0.5/31.0) && B.a < (0.5/31.0)) ? vec4(0.0) : mix(A, B, fx);
-        vec4 CD = (C.a < (0.5/31.0) && D.a < (0.5/31.0)) ? vec4(0.0) : mix(C, D, fx);
-        return (AB.a < (0.5/31.0) && CD.a < (0.5/31.0)) ? vec4(0.0) : mix(AB, CD, fy);
+        // Если нужно «бережное» смешивание по альфе (как у тебя для DS),
+        // можешь раскомментировать мягкий отсек для полностью прозрачных пар:
+        // const float alphaCut = 0.5/255.0;
+        // vec4 AB = (A.a < alphaCut && B.a < alphaCut) ? vec4(0.0) : mix(A, B, f.x);
+        // vec4 CD = (C.a < alphaCut && D.a < alphaCut) ? vec4(0.0) : mix(C, D, f.x);
+        // return (AB.a < alphaCut && CD.a < alphaCut) ? vec4(0.0) : mix(AB, CD, f.y);
+
+        vec4 AB = mix(A, B, f.x);
+        vec4 CD = mix(C, D, f.x);
+        return mix(AB, CD, f.y);
     }
 
-    // DS-путь (как у тебя), только ст собираем правильно:
+    // ---------------------- DS-путь ----------------------
+    // Билинейно из VRAM (4 выборки), как у тебя было.
+    int   twi = int(tw);
+    int   thi = int(th);
+
+    int   si = int(floor(st.x));
+    int   ti = int(floor(st.y));
+    float fx = fract(st.x);
+    float fy = fract(st.y);
+
     float alpha0 = ((attr & (1<<29)) != 0) ? 0.0 : 1.0;
     ivec2 vramaddr = ivec2((attr & 0xFFFF) << 3, paladdr);
-    ivec4 st_full  = ivec4(si, ti, tw, th);
+    ivec4 st_full  = ivec4(si, ti, twi, thi);
 
     vec4 A,B,C,D;
     int type = (attr >> 26) & 0x7;
@@ -576,6 +633,140 @@ vec4 TextureLookup_Linear(vec2 st)
     return (AB.a < (0.5/31.0) && CD.a < (0.5/31.0)) ? vec4(0.0) : mix(AB, CD, fy);
 }
 
+// -------- Catmull-Rom кубическая аппроксимация (a = -0.5) --------
+float cubicCR(float x) {
+    x = abs(x);
+    const float a = -0.5; // Catmull-Rom
+    if (x <= 1.0)
+        return ((a + 2.0)*x - (a + 3.0))*x*x + 1.0;
+    else if (x < 2.0)
+        return (a*x - 5.0*a)*x*x + (8.0*a)*x - 4.0*a;
+    else
+        return 0.0;
+}
+
+// =================== БИКУБИЧЕСКАЯ ФИЛЬТРАЦИЯ ДЛЯ MOD ===================
+vec4 TextureLookup_Bicubic(vec2 st)
+{
+    int attr    = int(fPolygonAttr.y);
+    int paladdr = int(fPolygonAttr.z);
+
+    float tw = float(8 << ((attr >> 20) & 7));
+    float th = float(8 << ((attr >> 23) & 7));
+    int   wrapmode = (attr >> 16);
+
+    // -------- MOD путь: ручной bi-cubic поверх ReplTex --------
+    if (uUseRepl != 0)
+    {
+        // uv в системе координат DS (0..1), БЕЗ квантования к DS-сетке
+        vec2 uv = st / vec2(tw, th);
+
+        // в пиксельное пространство мод-текстуры
+        // p = индекс пикселя относительно центров (0.5-сдвиг)
+        vec2 p  = uv * ReplSize - 0.5;
+        vec2 f  = fract(p);          // дробные части (веса)
+        vec2 b  = floor(p);          // базовый целый индекс
+
+        // веса Catmull-Rom по каждой оси
+        vec4 wx = vec4(
+            cubicCR(1.0 + f.x),  // x-1
+            cubicCR(0.0 + f.x),  // x+0
+            cubicCR(1.0 - f.x),  // x+1
+            cubicCR(2.0 - f.x)   // x+2
+        );
+        vec4 wy = vec4(
+            cubicCR(1.0 + f.y),  // y-1
+            cubicCR(0.0 + f.y),  // y+0
+            cubicCR(1.0 - f.y),  // y+1
+            cubicCR(2.0 - f.y)   // y+2
+        );
+
+        // центры пикселей в нормализованных координатах
+        vec2 base = (b + 0.5) / ReplSize;
+        vec2 dx   = vec2(1.0 / ReplSize.x, 0.0);
+        vec2 dy   = vec2(0.0, 1.0 / ReplSize.y);
+
+        // аккум с премультиплированной альфой (меньше ореолов на границах)
+        vec3 sumRGB = vec3(0.0);
+        float sumA  = 0.0;
+        float sumW  = 0.0;
+
+        // 4x4 семпла
+        for (int j = 0; j < 4; ++j) {
+            float wyj = wy[j];
+            float jy  = float(j - 1);
+            for (int i = 0; i < 4; ++i) {
+                float wxi = wx[i];
+                float ix  = float(i - 1);
+
+                vec2 uvij = base + ix*dx + jy*dy;
+                uvij = wrap01_px(uvij, wrapmode, ReplSize);
+
+                vec4 s = texture(ReplTex, uvij);
+                float w = wxi * wyj;
+
+                sumRGB += s.rgb * s.a * w; // премультиплированное
+                sumA   += s.a * w;
+                sumW   += w;
+            }
+        }
+
+        // размультиплирование (если есть непрозрачный вклад)
+        vec3 rgb = (sumA > 1e-6) ? (sumRGB / sumA) : vec3(0.0);
+        float a  = (sumW > 0.0) ? (sumA / sumW) : 0.0;
+
+        return vec4(rgb, a);
+    }
+
+    // -------- ОРИГИНАЛЬНЫЙ DS путь: как в билинейной версии (4 семпла) --------
+    int   twi = int(tw);
+    int   thi = int(th);
+
+    int   si = int(floor(st.x));
+    int   ti = int(floor(st.y));
+    float fx = fract(st.x);
+    float fy = fract(st.y);
+
+    float alpha0 = ((attr & (1<<29)) != 0) ? 0.0 : 1.0;
+    ivec2 vramaddr = ivec2((attr & 0xFFFF) << 3, paladdr);
+    ivec4 st_full  = ivec4(si, ti, twi, thi);
+
+    vec4 A,B,C,D;
+    int type = (attr >> 26) & 0x7;
+    if (type == 5) { A=TextureFetch_Compressed(vramaddr, st_full, wrapmode);
+                     B=TextureFetch_Compressed(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                     C=TextureFetch_Compressed(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                     D=TextureFetch_Compressed(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+    else if (type == 2) { A=TextureFetch_I2(vramaddr, st_full, wrapmode, alpha0);
+                          B=TextureFetch_I2(vramaddr, st_full+ivec4(1,0,0,0), wrapmode, alpha0);
+                          C=TextureFetch_I2(vramaddr, st_full+ivec4(0,1,0,0), wrapmode, alpha0);
+                          D=TextureFetch_I2(vramaddr, st_full+ivec4(1,1,0,0), wrapmode, alpha0); }
+    else if (type == 3) { A=TextureFetch_I4(vramaddr, st_full, wrapmode, alpha0);
+                          B=TextureFetch_I4(vramaddr, st_full+ivec4(1,0,0,0), wrapmode, alpha0);
+                          C=TextureFetch_I4(vramaddr, st_full+ivec4(0,1,0,0), wrapmode, alpha0);
+                          D=TextureFetch_I4(vramaddr, st_full+ivec4(1,1,0,0), wrapmode, alpha0); }
+    else if (type == 4) { A=TextureFetch_I8(vramaddr, st_full, wrapmode, alpha0);
+                          B=TextureFetch_I8(vramaddr, st_full+ivec4(1,0,0,0), wrapmode, alpha0);
+                          C=TextureFetch_I8(vramaddr, st_full+ivec4(0,1,0,0), wrapmode, alpha0);
+                          D=TextureFetch_I8(vramaddr, st_full+ivec4(1,1,0,0), wrapmode, alpha0); }
+    else if (type == 1) { A=TextureFetch_A3I5(vramaddr, st_full, wrapmode);
+                          B=TextureFetch_A3I5(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                          C=TextureFetch_A3I5(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                          D=TextureFetch_A3I5(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+    else if (type == 6) { A=TextureFetch_A5I3(vramaddr, st_full, wrapmode);
+                          B=TextureFetch_A5I3(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                          C=TextureFetch_A5I3(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                          D=TextureFetch_A5I3(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+    else                 { A=TextureFetch_Direct(vramaddr, st_full, wrapmode);
+                          B=TextureFetch_Direct(vramaddr, st_full+ivec4(1,0,0,0), wrapmode);
+                          C=TextureFetch_Direct(vramaddr, st_full+ivec4(0,1,0,0), wrapmode);
+                          D=TextureFetch_Direct(vramaddr, st_full+ivec4(1,1,0,0), wrapmode); }
+
+    vec4 AB = (A.a < (0.5/31.0) && B.a < (0.5/31.0)) ? vec4(0.0) : mix(A, B, fx);
+    vec4 CD = (C.a < (0.5/31.0) && D.a < (0.5/31.0)) ? vec4(0.0) : mix(C, D, fy);
+    return (AB.a < (0.5/31.0) && CD.a < (0.5/31.0)) ? vec4(0.0) : mix(AB, CD, fy);
+}
+
 vec4 FinalColor()
 {
     vec4 col;
@@ -597,8 +788,9 @@ vec4 FinalColor()
     }
     else
     {
-        vec4 tcol = TextureLookup_Nearest(fTexcoord);
+        //vec4 tcol = TextureLookup_Nearest(fTexcoord);
         //vec4 tcol = TextureLookup_Linear(fTexcoord);
+        vec4 tcol = TextureLookup_Bicubic(fTexcoord);
         if ((blendmode & 1) != 0)      // decal
         {
             col.rgb = (tcol.rgb * tcol.a) + (vcol.rgb * (1.0 - tcol.a));
