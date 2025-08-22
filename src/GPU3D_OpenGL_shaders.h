@@ -236,7 +236,7 @@ in ivec2 vTexcoord;
 in ivec3 vPolygonAttr;
 
 smooth out vec4 fColor;
-smooth out vec2 fTexcoord;
+noperspective out vec2 fTexcoord;
 flat out ivec3 fPolygonAttr;
 )";
 
@@ -263,7 +263,7 @@ layout(std140) uniform uConfig
 };
 
 smooth in vec4 fColor;
-smooth in vec2 fTexcoord;      // ожидается 4.12 fixed (как в существующем коде)
+noperspective in vec2 fTexcoord;      // ожидается 4.12 fixed (как в существующем коде)
 flat   in ivec3 fPolygonAttr;  // .y = TexParam, .z = TexPalette
 
 out vec4 oColor;
@@ -772,6 +772,7 @@ vec4 FinalColor()
     vec4 col;
     vec4 vcol = fColor;
     int blendmode = (fPolygonAttr.x >> 4) & 0x3;
+    int attr    = int(fPolygonAttr.y);
 
     if (blendmode == 2)
     {
@@ -781,6 +782,7 @@ vec4 FinalColor()
             vcol.rgb = vcol.rrr;                           // highlight
     }
 
+    vec2 st = fTexcoord;
     // текстуры могут быть выключены битом дисплея/формата
     if ((((fPolygonAttr.y >> 26) & 0x7) == 0) || ((uDispCnt & (1<<0)) == 0))
     {
@@ -788,9 +790,10 @@ vec4 FinalColor()
     }
     else
     {
+        st += vec2(0.0, 0.0f);
         //vec4 tcol = TextureLookup_Nearest(fTexcoord);
         //vec4 tcol = TextureLookup_Linear(fTexcoord);
-        vec4 tcol = TextureLookup_Bicubic(fTexcoord);
+        vec4 tcol = TextureLookup_Bicubic(st);
         if ((blendmode & 1) != 0)      // decal
         {
             col.rgb = (tcol.rgb * tcol.a) + (vcol.rgb * (1.0 - tcol.a));
@@ -815,46 +818,52 @@ vec4 FinalColor()
 
 const char* kRenderVS_Z = R"(
 
+#define POS_DIVISOR 16.0  // если vPosition.xy уже в пикселях — поставь 1.0
+
 void main()
 {
-    int attr = vPolygonAttr.x;
+    int attr   = vPolygonAttr.x;
     int zshift = (attr >> 16) & 0x1F;
 
-    vec4 fpos;
-    fpos.xy = (((vec2(vPosition.xy) ) * 2.0) / uScreenSize) - 1.0;
-    fpos.z = (float(vPosition.z << zshift) / 8388608.0) - 1.0;
-    fpos.w = float(vPosition.w) / 65536.0f;
-    fpos.xyz *= fpos.w;
+    // экранные координаты DS -> пиксели
+    vec2 posPx = vec2(vPosition.xy) / POS_DIVISOR;
 
-    fColor = vec4(vColor) / vec4(255.0,255.0,255.0,31.0);
-    fTexcoord = vec2(vTexcoord) / 16.0;
+    // Мапим ЦЕНТРЫ пикселей в NDC: (x+0.5, y+0.5)
+    vec2 ndc = ((posPx + vec2(0.5, 0.5)) * 2.0 / uScreenSize) - 1.0;
+
+    // Z как у тебя, W = 1 (XY уже в экранных координатах)
+    float z = (float(vPosition.z << zshift) / 8388608.0) - 1.0;
+
+    gl_Position = vec4(ndc, z, 1.0);
+
+    fColor     = vec4(vColor) / vec4(255.0, 255.0, 255.0, 31.0);
+    fTexcoord  = vec2(vTexcoord) / 16.0; // тут всё как было
     fPolygonAttr = vPolygonAttr;
-
-    gl_Position = fpos;
 }
 )";
 
 const char* kRenderVS_W = R"(
 
+#define POS_DIVISOR 1.0  // если vPosition.xy уже в пикселях — поставь 1.0
+
 smooth out float fZ;
 
 void main()
 {
-    int attr = vPolygonAttr.x;
+    int attr   = vPolygonAttr.x;
     int zshift = (attr >> 16) & 0x1F;
 
-    vec4 fpos;
-    fpos.xy = (((vec2(vPosition.xy) ) * 2.0) / uScreenSize) - 1.0;
-    fpos.z = 0.0;
+    vec2 posPx = vec2(vPosition.xy) / POS_DIVISOR;
+    vec2 ndc   = ((posPx + vec2(0.5, 0.5)) * 2.0 / uScreenSize) - 1.0;
+
+    // W-buffer глубина, как у тебя
     fZ = float(vPosition.z << zshift) / 16777216.0;
-    fpos.w = float(vPosition.w) / 65536.0f;
-    fpos.xy *= fpos.w;
 
-    fColor = vec4(vColor) / vec4(255.0,255.0,255.0,31.0);
-    fTexcoord = vec2(vTexcoord) / 16.0;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+
+    fColor     = vec4(vColor) / vec4(255.0, 255.0, 255.0, 31.0);
+    fTexcoord  = vec2(vTexcoord) / 16.0;
     fPolygonAttr = vPolygonAttr;
-
-    gl_Position = fpos;
 }
 )";
 

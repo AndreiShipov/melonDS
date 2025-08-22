@@ -147,6 +147,20 @@ GPU3D::GPU3D(melonDS::NDS& nds, std::unique_ptr<Renderer3D>&& renderer) noexcept
 {
 }
 
+static inline bool ShouldSnapHiResToDS(u32 polyAttr, u32 texParam)
+{
+    // эвристика для «масок»:
+    //  - спец. маски теней
+    //  - палитровые форматы с альфой (A3I5/A5I3)
+    //  - полигоны с неполной альфой (часто именно ими вырезают силуэт)
+    const u32 texfmt = (texParam >> 26) & 7;
+    const u32 alpha  = (polyAttr  >> 16) & 0x1F;
+    const bool isShadowMask = ((polyAttr & 0x3F000030) == 0x00000030);
+    const bool isAlphaTex   = (texfmt == 1 || texfmt == 6);    // A3I5 / A5I3
+    const bool hasPolyAlpha = (alpha > 0 && alpha < 31);
+    return isShadowMask || isAlphaTex || hasPolyAlpha;
+}
+
 void Vertex::DoSavestate(Savestate* file) noexcept
 {
     file->VarArray(Position, sizeof(Position));
@@ -1101,6 +1115,8 @@ void GPU3D::SubmitPolygon() noexcept
 
     // compute screen coordinates
 
+    bool snapHiRes = ShouldSnapHiResToDS(CurPolygonAttr, TexParam);
+
     for (int i = clipstart; i < nverts; i++)
     {
         Vertex* vtx = &clippedvertices[i];
@@ -1145,11 +1161,20 @@ void GPU3D::SubmitPolygon() noexcept
         // to consider: only do this when using the GL renderer? apply the aforementioned quirk to this?
         if (w != 0)
         {
-            posX = ((((s64)(vtx->Position[0] + w) * Viewport[4]) << 4) / (((s64)w) << 1)) + (Viewport[0] << 4);
-            posY = ((((s64)(-vtx->Position[1] + w) * Viewport[5]) << 4) / (((s64)w) << 1)) + (Viewport[3] << 4);
-
-            vtx->HiresPosition[0] = posX & 0x1FFF;
-            vtx->HiresPosition[1] = posY & 0xFFF;
+            if (snapHiRes)
+            {
+                // ВАЖНО: даём рендереру hi-res, но ровно по DS-сетке
+                vtx->HiresPosition[0] = (vtx->FinalPosition[0] & 0x1FF) << 4;
+                vtx->HiresPosition[1] = (vtx->FinalPosition[1] & 0xFF)  << 4;
+            }
+            else
+            {
+                // исходный код
+                posX = ((((s64)(vtx->Position[0] + w) * Viewport[4]) << 4) / (((s64)w) << 1)) + (Viewport[0] << 4);
+                posY = ((((s64)(-vtx->Position[1] + w) * Viewport[5]) << 4) / (((s64)w) << 1)) + (Viewport[3] << 4);
+                vtx->HiresPosition[0] = posX & 0x1FFF;
+                vtx->HiresPosition[1] = posY & 0xFFF;
+            }
         }
     }
 
