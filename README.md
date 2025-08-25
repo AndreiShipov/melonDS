@@ -1,6 +1,12 @@
 <p align="center"><img src="https://raw.githubusercontent.com/melonDS-emu/melonDS/master/res/icon/melon_128x128.png"></p>
 <h2 align="center"><b>melonDS</b></h2>
+<h3 align="center"><b>Customized by AJA (ver 3)</b></h3>
+Now supports texture dump and texture restore! Enjoy NDS games with HD texture quality!
+
+See [TEXTURE_REPLACE.md](./TEXTURE_REPLACE.md) for more details.
+<hr>
 <p align="center">
+
 <a href="http://melonds.kuribo64.net/" alt="melonDS website"><img src="https://img.shields.io/badge/website-melonds.kuribo64.net-%2331352e.svg"></a>
 <a href="http://melonds.kuribo64.net/downloads.php" alt="Release: 1.0"><img src="https://img.shields.io/badge/release-1.0-%235c913b.svg"></a>
 <a href="https://www.gnu.org/licenses/gpl-3.0" alt="License: GPLv3"><img src="https://img.shields.io/badge/License-GPL%20v3-%23ff554d.svg"></a>
