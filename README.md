@@ -4,6 +4,8 @@
 Now supports texture dump and texture restore! Enjoy NDS games with HD texture quality!
 
 See [TEXTURE_REPLACE.md](./TEXTURE_REPLACE.md) for more details.
+
+Original repo: https://github.com/melonDS-emu/melonDS
 <hr>
 <p align="center">
 
